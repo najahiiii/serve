@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
+    <title>Directory Listing of {{.Directory}}</title>
+    <meta name="description" content="Browse files and folders located at {{.Directory}}.">
+    <meta name="robots" content="index, follow">
+    <style>
+        body {
+            font-family: "Lucida Console", "Courier New", monospace;
+            -webkit-user-select: none;
+            -ms-user-select: none;
+            user-select: none;
+        }
+        h1 {
+            font-family: "Times New Roman", Times, serif;
+            border-bottom: 1px solid silver;
+            margin-bottom: 10px;
+            padding-bottom: 10px;
+            white-space: nowrap;
+        }
+        table {
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 4px 12px;
+        }
+        th:hover, td:hover {
+            text-decoration: underline;
+        }
+        .file-name {
+            text-align: left;
+        }
+        .file-size {
+            text-align: center;
+        }
+        .date {
+            text-align: right;
+        }
+        a {
+            color: #1e90ff;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: unset;
+        }
+        footer {
+            font-family: "Lucida Console", "Courier New", monospace;
+            border-top: 1px solid silver;
+            margin-top: 10px;
+            padding-top: 10px;
+            white-space: nowrap;
+        }
+    </style>
+</head>
+<body>
+    <h1>Index of {{.Directory}}</h1>
+    <table>
+        <tr>
+            <th class="file-name">Name</th>
+            <th class="file-size">Size</th>
+            <th class="date">Last Modified</th>
+        </tr>
+        {{if .ParentURL}}
+        <tr>
+            <td colspan="3"><a href="{{.ParentURL}}">..</a></td>
+        </tr>
+        {{end}}
+        {{range .Items}}
+        <tr>
+            <td class="file-name"><a href="{{.URL}}">{{.DisplayName}}</a></td>
+            <td class="file-size">{{.SizeHuman}}</td>
+            <td class="date">{{.ModHuman}}</td>
+        </tr>
+        {{end}}
+    </table>
+    <footer>&copy; {{.Year}} <i>{{.Host}}</i>.</footer>
+</body>
+</html>

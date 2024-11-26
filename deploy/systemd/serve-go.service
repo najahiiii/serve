@@ -1,0 +1,16 @@
+[Unit]
+Description=Serve-Go File Server
+After=network.target
+ConditionPathExists=/usr/local/bin/serve-go
+
+[Service]
+Type=simple
+# User=serve
+# Group=serve
+# WorkingDirectory=/var/lib/serve
+ExecStart=/usr/local/bin/serve-go run --config /etc/serve/serve-go.toml
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

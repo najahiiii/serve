@@ -1,0 +1,17 @@
+[Unit]
+Description=Serve-Rs File Server
+After=network.target
+ConditionPathExists=/usr/local/bin/serve-rs
+
+[Service]
+Type=simple
+# User=serve
+# Group=serve
+# WorkingDirectory=/var/lib/serve
+ExecStart=/usr/local/bin/serve-rs run --config /etc/serve/serve-rs.toml
+Restart=on-failure
+RestartSec=5s
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
