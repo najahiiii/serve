@@ -1,0 +1,53 @@
+"""Configuration"""
+
+HOST = "0.0.0.0"
+PORT = 3345
+BLACKLISTED_FILES = [".git", "serve", "utils", "server.py", ".env"]
+UPLOAD_TOKEN = "ABOGOBOGA"
+MAX_FILE_SIZE = 2000 * 1024 * 1024  # 2GB
+ALLOWED_EXTENSIONS = {
+    "mp3",
+    "wav",
+    "aac",
+    "ogg",
+    "flac",
+    "m4a",
+    "mp4",
+    "avi",
+    "mov",
+    "wmv",
+    "mkv",
+    "flv",
+    "webm",
+    "jpg",
+    "jpeg",
+    "png",
+    "gif",
+    "bmp",
+    "tiff",
+    "svg",
+    "zip",
+    "tar",
+    "gz",
+    "bz2",
+    "7z",
+    "rar",
+    "exe",
+    "bin",
+    "dll",
+    "deb",
+    "rpm",
+    "iso",
+    "pdf",
+    "doc",
+    "docx",
+    "xls",
+    "xlsx",
+    "ppt",
+    "pptx",
+    "txt",
+    "csv",
+    "odt",
+    "rtf",
+    "xml",
+}
