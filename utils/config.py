@@ -1,8 +1,8 @@
 """Configuration"""
 
-HOST = "0.0.0.0"
+HOST = "127.0.0.1"
 PORT = 3345
-BLACKLISTED_FILES = [".git", "serve", "utils", "server.py", ".env"]
+BLACKLISTED_FILES = [".git", "serve", "utils", "server.py", ".env", ".gitignore", "LICENSE", "README.md", "app.py", "uwsgi.ini", "wsgi.py", "__pycache__"]
 UPLOAD_TOKEN = "ABOGOBOGA"
 MAX_FILE_SIZE = 2000 * 1024 * 1024  # 2GB
 ALLOWED_EXTENSIONS = {
