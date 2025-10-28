@@ -7,7 +7,7 @@ use reqwest::blocking::{Client, Response, multipart};
 use reqwest::header::ACCEPT;
 use serde::Deserialize;
 use std::fs::{self, File};
-use std::io::{BufWriter, Read, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use tabled::{Table, Tabled, settings::Style};
 
@@ -203,9 +203,25 @@ fn upload(
         anyhow::bail!("file not found: {}", file_path);
     }
 
-    let mut form = multipart::Form::new()
-        .file("file", file_path)
-        .with_context(|| format!("failed to add file {} to form", file_path))?;
+    let file =
+        File::open(file_path).with_context(|| format!("failed to open file {}", file_path))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to read metadata for {}", file_path))?;
+    let file_size = metadata.len();
+    let file_name = Path::new(file_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("upload.bin")
+        .to_string();
+
+    let progress = create_progress_bar(Some(file_size), &file_name);
+    let reader = ProgressReader::new(file, progress.clone());
+
+    let mut form = multipart::Form::new().part(
+        "file",
+        multipart::Part::reader_with_length(reader, file_size).file_name(file_name),
+    );
 
     if !upload_path.is_empty() {
         form = form.text("path", upload_path.to_string());
@@ -224,11 +240,23 @@ fn upload(
         request = request.header("X-Allow-No-Ext", "true");
     }
 
-    let response = request
-        .send()
-        .context("upload request failed")?
-        .error_for_status()
-        .context("server returned error for upload")?;
+    let response = request.send();
+    let response = match response {
+        Ok(resp) => resp,
+        Err(err) => {
+            progress.abandon_with_message("Upload failed");
+            return Err(err).context("upload request failed");
+        }
+    };
+
+    let response = match response.error_for_status() {
+        Ok(resp) => resp,
+        Err(err) => {
+            progress.abandon_with_message("Upload failed");
+            return Err(err).context("server returned error for upload");
+        }
+    };
+    progress.finish_with_message("Upload complete");
 
     let data: UploadResponse = parse_json(response)?;
     if data.status != "success" {
@@ -387,6 +415,27 @@ fn stream_to_writer(
     Ok(downloaded)
 }
 
+struct ProgressReader<R> {
+    inner: R,
+    progress: ProgressBar,
+}
+
+impl<R> ProgressReader<R> {
+    fn new(inner: R, progress: ProgressBar) -> Self {
+        Self { inner, progress }
+    }
+}
+
+impl<R: Read> Read for ProgressReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let bytes = self.inner.read(buf)?;
+        if bytes > 0 {
+            self.progress.inc(bytes as u64);
+        }
+        Ok(bytes)
+    }
+}
+
 fn format_label(label: &str) -> String {
     const MAX: usize = 25;
     if label.len() <= MAX {
@@ -425,7 +474,7 @@ fn derive_file_name(remote: &str) -> PathBuf {
 fn derive_directory_name(remote: &str) -> Result<PathBuf> {
     let clean = remote.trim_end_matches('/');
     if clean == "/" || clean.is_empty() {
-        Ok(PathBuf::from("."))
+        Ok(PathBuf::from("download"))
     } else if let Some(name) = Path::new(clean).file_name().and_then(|s| s.to_str()) {
         Ok(PathBuf::from(name))
     } else {
