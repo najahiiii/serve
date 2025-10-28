@@ -372,7 +372,7 @@ async fn render_directory(
         .map(|value| value.eq_ignore_ascii_case("serve-cli"))
         .unwrap_or(false)
     {
-        let base_url = build_base_url(headers, &Uri::from_static(""));
+        let base_url = build_base_url(headers);
         let base_trimmed = base_url.trim_end_matches('/');
         let entries_json: Vec<_> = entries
             .iter()
@@ -659,7 +659,7 @@ async fn handle_upload(
             .to_string_lossy()
             .replace(std::path::MAIN_SEPARATOR, "/");
 
-        let base_url = build_base_url(&headers, &uri);
+    let base_url = build_base_url(&headers);
 
         saved_file = Some(UploadResponse {
             name: safe_name,
@@ -800,7 +800,7 @@ fn client_user_agent(headers: &HeaderMap) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn build_base_url(headers: &HeaderMap, _uri: &Uri) -> String {
+fn build_base_url(headers: &HeaderMap) -> String {
     let scheme = headers
         .get("X-Forwarded-Proto")
         .and_then(|value| value.to_str().ok())
