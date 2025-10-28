@@ -49,7 +49,8 @@ allowed_extensions = [
 ]
 "#;
 const POWERED_BY: &str = concat!("serve-rs/", env!("CARGO_PKG_VERSION"));
-const STREAM_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+// Smaller chunk keeps initial response snappy while still streaming efficiently.
+const STREAM_BUFFER_BYTES: usize = 256 * 1024;
 
 #[derive(Parser)]
 #[command(
