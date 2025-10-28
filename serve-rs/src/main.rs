@@ -48,6 +48,7 @@ allowed_extensions = [
 ]
 "#;
 const POWERED_BY: &str = concat!("serve-rs/", env!("CARGO_PKG_VERSION"));
+const STREAM_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Parser)]
 #[command(
@@ -91,7 +92,7 @@ struct AppState {
     canonical_root: Arc<PathBuf>,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -400,7 +401,7 @@ async fn serve_file(
     view: bool,
 ) -> Result<Response, AppError> {
     let file = fs::File::open(&full_path).await.map_err(map_io_error)?;
-    let stream = ReaderStream::with_capacity(file, 1 << 20);
+    let stream = ReaderStream::with_capacity(file, STREAM_BUFFER_BYTES);
     let body = Body::from_stream(stream);
 
     let mime = MimeGuess::from_path(&full_path)
