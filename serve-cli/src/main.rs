@@ -636,17 +636,18 @@ fn create_progress_bar(total: Option<u64>, label: &str) -> ProgressBar {
         pb.set_prefix(formatted);
         pb.set_style(
             ProgressStyle::with_template(
-                "{prefix} {bar:40.cyan/blue} {bytes}/{total_bytes} ({eta})",
+                "{prefix} {bar:40.cyan/blue} {bytes}/{total_bytes} ({eta}) {bytes_per_sec}",
             )
             .unwrap()
             .progress_chars("##-"),
         );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
         pb
     } else {
         let pb = ProgressBar::new_spinner();
         pb.set_prefix(formatted);
         pb.set_style(
-            ProgressStyle::with_template("{prefix} {spinner} {bytes} downloaded")
+            ProgressStyle::with_template("{prefix} {spinner} {bytes} downloaded ({bytes_per_sec})")
                 .unwrap()
                 .tick_strings(&["-", "\\", "|", "/"]),
         );
