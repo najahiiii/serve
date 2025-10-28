@@ -5,7 +5,7 @@ mod utils;
 use axum::{
     Router,
     body::Body,
-    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State, multipart::MultipartError},
     http::{Extensions, HeaderMap, HeaderValue, StatusCode, Version, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -665,6 +665,13 @@ fn parse_range_header(value: &str, size: u64) -> Result<Option<(u64, u64)>, ()> 
     }
 }
 
+fn is_upload_cancelled(err: &MultipartError) -> bool {
+    let message = err.to_string();
+    message.contains("connection closed")
+        || message.contains("Incomplete")
+        || message.contains("multipart/form-data")
+}
+
 async fn handle_upload(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -690,10 +697,26 @@ async fn handle_upload(
 
     let mut saved_file = None;
 
-    while let Some(field) = multipart.next_field().await.map_err(|err| {
-        error!("Multipart parsing error: {}", err);
-        AppError::BadRequest("Invalid multipart payload".to_string())
-    })? {
+    loop {
+        let mut field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(err) => {
+                if is_upload_cancelled(&err) {
+                    info!("Upload aborted by client: {}", err);
+                    let status = StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST);
+                    return Ok(Response::builder()
+                        .status(status)
+                        .body(Body::empty())
+                        .unwrap());
+                }
+                error!("Multipart parsing error: {}", err);
+                return Err(AppError::BadRequest(
+                    "Invalid multipart payload".to_string(),
+                ));
+            }
+        };
+
         if field.name() == Some("path") {
             let text = field.text().await.map_err(|err| {
                 error!("Failed to read path field: {}", err);
@@ -749,8 +772,6 @@ async fn handle_upload(
             AppError::BadRequest("No selected file or file type not allowed".to_string())
         })?;
 
-        let mut file = field;
-
         let target_dir = if target_dir_path.trim().is_empty() {
             state.canonical_root.as_ref().clone()
         } else {
@@ -778,7 +799,7 @@ async fn handle_upload(
 
         let mut total_bytes = 0u64;
 
-        while let Some(chunk) = file.chunk().await.map_err(|err| {
+        while let Some(chunk) = field.chunk().await.map_err(|err| {
             error!("Failed to read upload chunk: {}", err);
             AppError::Internal("Internal server error".to_string())
         })? {
@@ -789,7 +810,7 @@ async fn handle_upload(
             output.write_all(&chunk).await.map_err(map_io_error)?;
         }
 
-        let mime_type = file
+        let mime_type = field
             .content_type()
             .map(|m| m.to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());

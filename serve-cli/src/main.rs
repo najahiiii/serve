@@ -1,14 +1,14 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::StatusCode;
 use reqwest::Url;
 use reqwest::blocking::{Client, Response, multipart};
-use reqwest::header::ACCEPT;
+use reqwest::header::{ACCEPT, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File};
-use std::io::{self, BufWriter, Read, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use tabled::{Table, Tabled, settings::Style};
 
@@ -66,6 +66,9 @@ enum Command {
         /// Download directories recursively
         #[arg(long, default_value_t = false)]
         recursive: bool,
+        /// Number of parts to split the download into (requires range support)
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=16))]
+        connections: u8,
     },
     /// Interactive configuration helper
     Setup,
@@ -175,9 +178,16 @@ fn main() -> Result<()> {
             path,
             out,
             recursive,
+            connections,
         } => {
             let resolved_host = resolve_host(host, &app_config);
-            download(&resolved_host, &path, out, recursive)
+            download(
+                &resolved_host,
+                &path,
+                out,
+                recursive,
+                connections.clamp(1, 16),
+            )
         }
         Command::Setup => run_setup(config.as_deref(), &app_config),
         Command::Config => show_config(&loaded_config, config.as_deref()),
@@ -551,6 +561,7 @@ fn download(
     remote_path: &str,
     out_override: Option<String>,
     recursive: bool,
+    connections: u8,
 ) -> Result<()> {
     let trimmed = remote_path.trim();
     if trimmed.is_empty() {
@@ -574,7 +585,14 @@ fn download(
         };
 
         let remote_dir = ensure_trailing_slash(&remote);
-        download_directory_recursive(&client, host, &remote_dir, &base_local, listing)?;
+        download_directory_recursive(
+            &client,
+            host,
+            &remote_dir,
+            &base_local,
+            listing,
+            connections,
+        )?;
         println!("Directory saved to {}", base_local.display());
         return Ok(());
     }
@@ -584,7 +602,7 @@ fn download(
         None => derive_file_name(&remote),
     };
 
-    download_file(&client, host, &remote, &output_path)?;
+    download_file(&client, host, &remote, &output_path, connections)?;
     println!("Saved to {}", output_path.display());
     Ok(())
 }
@@ -619,14 +637,6 @@ fn parse_json<T: for<'de> Deserialize<'de>>(response: Response) -> Result<T> {
     response
         .json::<T>()
         .context("failed to decode JSON response")
-}
-
-fn content_length(response: &Response) -> Option<u64> {
-    response
-        .headers()
-        .get(reqwest::header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|s| s.parse().ok())
 }
 
 fn create_progress_bar(total: Option<u64>, label: &str) -> ProgressBar {
@@ -676,11 +686,7 @@ fn stream_to_writer(
             .with_context(|| "failed writing to output file")?;
         downloaded += read as u64;
 
-        if pb.length().is_some() {
-            pb.set_position(downloaded);
-        } else {
-            pb.inc(read as u64);
-        }
+        pb.inc(read as u64);
     }
 
     writer.flush().context("failed to flush output file")?;
@@ -803,7 +809,13 @@ fn fetch_listing_optional(
     }
 }
 
-fn download_file(client: &Client, host: &str, remote: &str, output: &Path) -> Result<()> {
+fn download_file(
+    client: &Client,
+    host: &str,
+    remote: &str,
+    output: &Path,
+    connections: u8,
+) -> Result<()> {
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).with_context(|| {
@@ -813,30 +825,367 @@ fn download_file(client: &Client, host: &str, remote: &str, output: &Path) -> Re
     }
 
     let url = normalize_url(host, remote)?;
-    let mut response = client
-        .get(url.clone())
-        .header("X-Serve-Client", CLIENT_HEADER_VALUE)
-        .send()
-        .with_context(|| format!("request failed for {}", url))?
-        .error_for_status()
-        .with_context(|| format!("server returned error for {}", url))?;
+    let probe = probe_file(client, &url)?;
 
-    let mut file = BufWriter::new(
-        File::create(output)
-            .with_context(|| format!("failed to create output file {}", output.display()))?,
-    );
-
-    let total = content_length(&response);
     let label_owned = output
         .file_name()
         .and_then(|s| s.to_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| output.to_string_lossy().into_owned());
-    let progress = create_progress_bar(total, &label_owned);
 
-    let bytes_written = stream_to_writer(&mut response, &mut file, &progress)?;
+    if let Some(total) = probe.length {
+        let mut part_count = usize::from(connections.max(1).min(16));
+        if part_count == 0 {
+            part_count = 1;
+        }
+        if !probe.accept_ranges || total == 0 {
+            part_count = 1;
+        }
+
+        if total == 0 {
+            let progress = create_progress_bar(Some(0), &label_owned);
+            progress.finish_with_message("Download complete");
+            finalize_empty_file(output)?;
+            println!("Downloaded 0 bytes from {}", remote);
+            return Ok(());
+        }
+
+        let mut part_infos = build_part_plan(output, total, part_count)?;
+        let mut completed = 0u64;
+        for info in &part_infos {
+            completed = completed.saturating_add(info.existing_bytes);
+        }
+
+        let progress = create_progress_bar(Some(total), &label_owned);
+        progress.set_position(completed.min(total));
+
+        for info in &mut part_infos {
+            let part_total = info.len();
+            if info.existing_bytes >= part_total {
+                continue;
+            }
+
+            let range_start = info.start + info.existing_bytes;
+            let range_end = info.end;
+
+            let mut request = client
+                .get(url.clone())
+                .header("X-Serve-Client", CLIENT_HEADER_VALUE);
+
+            if range_start > 0 || range_end + 1 != total {
+                request = request.header(RANGE, format!("bytes={}-{}", range_start, range_end));
+            }
+
+            let mut response = request
+                .send()
+                .with_context(|| format!("request failed for {}", url))?
+                .error_for_status()
+                .with_context(|| format!("server returned error for {}", url))?;
+
+            if (range_start > 0 || range_end + 1 != total)
+                && response.status() != StatusCode::PARTIAL_CONTENT
+            {
+                anyhow::bail!("server did not honor range request");
+            }
+
+            let mut file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(&info.path)
+                .with_context(|| format!("failed to open temp file {}", info.path.display()))?;
+            file.seek(SeekFrom::Start(info.existing_bytes))
+                .with_context(|| format!("failed to seek temp file {}", info.path.display()))?;
+            let mut writer = BufWriter::new(file);
+
+            let expected = part_total - info.existing_bytes;
+            let bytes_written = stream_to_writer(&mut response, &mut writer, &progress)?;
+            if bytes_written != expected {
+                anyhow::bail!(
+                    "download interrupted for part {} (expected {} bytes, got {})",
+                    info.index,
+                    expected,
+                    bytes_written
+                );
+            }
+            info.existing_bytes = part_total;
+        }
+
+        progress.finish_with_message("Download complete");
+        finalize_parts(output, total, &part_infos)?;
+        println!("Downloaded {} bytes from {}", total, remote);
+        Ok(())
+    } else {
+        download_without_length(client, &url, output, &label_owned, probe.accept_ranges)
+            .with_context(|| "streaming download failed")?;
+        println!("Downloaded file from {}", remote);
+        Ok(())
+    }
+}
+
+struct FileProbe {
+    length: Option<u64>,
+    accept_ranges: bool,
+}
+
+fn probe_file(client: &Client, url: &Url) -> Result<FileProbe> {
+    let mut length = None;
+    let mut accept_ranges = false;
+
+    let head_response = client
+        .head(url.clone())
+        .header("X-Serve-Client", CLIENT_HEADER_VALUE)
+        .send();
+
+    if let Ok(resp) = head_response {
+        if resp.status().is_success() {
+            if let Some(value) = resp.headers().get(CONTENT_LENGTH) {
+                if let Ok(text) = value.to_str() {
+                    if let Ok(parsed) = text.parse::<u64>() {
+                        length = Some(parsed);
+                    }
+                }
+            }
+            if let Some(value) = resp.headers().get(ACCEPT_RANGES) {
+                if let Ok(text) = value.to_str() {
+                    if text.eq_ignore_ascii_case("bytes") {
+                        accept_ranges = true;
+                    }
+                }
+            }
+            return Ok(FileProbe {
+                length,
+                accept_ranges,
+            });
+        }
+    }
+
+    let request = client
+        .get(url.clone())
+        .header("X-Serve-Client", CLIENT_HEADER_VALUE)
+        .header(RANGE, "bytes=0-0");
+    let resp = request.send()?;
+
+    if resp.status() == StatusCode::PARTIAL_CONTENT {
+        accept_ranges = true;
+    }
+
+    if let Some(value) = resp.headers().get(CONTENT_RANGE) {
+        if let Ok(text) = value.to_str() {
+            if let Some(pos) = text.rfind('/') {
+                if let Ok(total) = text[pos + 1..].parse::<u64>() {
+                    length = Some(total);
+                }
+            }
+        }
+    } else if let Some(value) = resp.headers().get(CONTENT_LENGTH) {
+        if let Ok(text) = value.to_str() {
+            if let Ok(parsed) = text.parse::<u64>() {
+                length = Some(parsed);
+            }
+        }
+    }
+
+    // Drain body to reuse connection.
+    let _ = resp.bytes();
+
+    Ok(FileProbe {
+        length,
+        accept_ranges,
+    })
+}
+
+struct PartInfo {
+    index: usize,
+    start: u64,
+    end: u64,
+    path: PathBuf,
+    existing_bytes: u64,
+}
+
+impl PartInfo {
+    fn len(&self) -> u64 {
+        self.end.saturating_sub(self.start) + 1
+    }
+}
+
+fn build_part_plan(output: &Path, total: u64, requested_parts: usize) -> Result<Vec<PartInfo>> {
+    let parent = output.parent().unwrap_or(Path::new("."));
+    let file_name = output
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("output path lacks valid filename"))?;
+    let prefix = format!(".{}", file_name);
+
+    let mut parts = Vec::new();
+    let chunk_size = (total + requested_parts as u64 - 1) / requested_parts as u64;
+
+    for index in 0..requested_parts {
+        let start = index as u64 * chunk_size;
+        if start >= total {
+            break;
+        }
+        let end = (start + chunk_size - 1).min(total.saturating_sub(1));
+        let path = parent.join(format!("{}.part{:02}.tmp", prefix, index));
+        let mut existing_bytes = if path.exists() {
+            fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0)
+        } else {
+            0
+        };
+        let part_len = end - start + 1;
+        if existing_bytes > part_len {
+            if let Ok(file) = OpenOptions::new().write(true).open(&path) {
+                let _ = file.set_len(part_len);
+            }
+            existing_bytes = part_len;
+        }
+        existing_bytes = existing_bytes.min(part_len);
+        parts.push(PartInfo {
+            index,
+            start,
+            end,
+            path,
+            existing_bytes,
+        });
+    }
+
+    if parts.is_empty() {
+        let end = total.saturating_sub(1);
+        parts.push(PartInfo {
+            index: 0,
+            start: 0,
+            end,
+            path: parent.join(format!("{}.part00.tmp", prefix)),
+            existing_bytes: 0,
+        });
+    }
+
+    Ok(parts)
+}
+
+fn finalize_parts(output: &Path, total: u64, parts: &[PartInfo]) -> Result<()> {
+    let parent = output.parent().unwrap_or(Path::new("."));
+    let file_name = output
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("output path lacks valid filename"))?;
+    let temp_path = parent.join(format!(".{}.tmp", file_name));
+
+    let mut final_file = File::create(&temp_path)
+        .with_context(|| format!("failed to create temp file {}", temp_path.display()))?;
+    for part in parts {
+        let mut reader = BufReader::new(
+            File::open(&part.path)
+                .with_context(|| format!("failed to open part {}", part.path.display()))?,
+        );
+        io::copy(&mut reader, &mut final_file)
+            .with_context(|| format!("failed to merge part {}", part.path.display()))?;
+    }
+    final_file.flush()?;
+    drop(final_file);
+
+    if output.exists() {
+        fs::remove_file(output)
+            .with_context(|| format!("failed to remove existing file {}", output.display()))?;
+    }
+
+    fs::rename(&temp_path, output).with_context(|| {
+        format!(
+            "failed to move temp file into place for {}",
+            output.display()
+        )
+    })?;
+
+    for part in parts {
+        let _ = fs::remove_file(&part.path);
+    }
+
+    let meta = fs::metadata(output)
+        .with_context(|| format!("failed to stat downloaded file {}", output.display()))?;
+    if meta.len() != total {
+        anyhow::bail!(
+            "merged file size mismatch (expected {} bytes, found {})",
+            total,
+            meta.len()
+        );
+    }
+
+    Ok(())
+}
+
+fn finalize_empty_file(output: &Path) -> Result<()> {
+    let parent = output.parent().unwrap_or(Path::new("."));
+    let file_name = output
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow!("output path lacks valid filename"))?;
+    let temp_path = parent.join(format!(".{}.tmp", file_name));
+    File::create(&temp_path)?;
+    if output.exists() {
+        fs::remove_file(output).ok();
+    }
+    fs::rename(&temp_path, output)?;
+    Ok(())
+}
+
+fn download_without_length(
+    client: &Client,
+    url: &Url,
+    output: &Path,
+    label: &str,
+    accept_ranges: bool,
+) -> Result<()> {
+    let parent = output.parent().unwrap_or(Path::new("."));
+    let file_name = output
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("output path lacks valid filename"))?;
+    let temp_path = parent.join(format!(".{}.part00.tmp", file_name));
+
+    let mut existing = if temp_path.exists() {
+        fs::metadata(&temp_path).map(|meta| meta.len()).unwrap_or(0)
+    } else {
+        0
+    };
+
+    let mut request = client
+        .get(url.clone())
+        .header("X-Serve-Client", CLIENT_HEADER_VALUE);
+    if accept_ranges && existing > 0 {
+        request = request.header(RANGE, format!("bytes={}-", existing));
+    }
+
+    let mut response = request.send()?.error_for_status()?;
+
+    if accept_ranges && existing > 0 && response.status() != StatusCode::PARTIAL_CONTENT {
+        // Server refused the range; restart download.
+        existing = 0;
+        let _ = fs::remove_file(&temp_path);
+        response = client
+            .get(url.clone())
+            .header("X-Serve-Client", CLIENT_HEADER_VALUE)
+            .send()?;
+        response = response.error_for_status()?;
+    }
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&temp_path)?;
+    file.seek(SeekFrom::Start(existing))?;
+    let mut writer = BufWriter::new(file);
+
+    let progress = create_progress_bar(None, label);
+    if existing > 0 {
+        progress.inc(existing);
+    }
+    let _bytes_written = stream_to_writer(&mut response, &mut writer, &progress)?;
     progress.finish_with_message("Download complete");
-    println!("Downloaded {} bytes from {}", bytes_written, remote);
+
+    drop(writer);
+    if output.exists() {
+        fs::remove_file(output).ok();
+    }
+    fs::rename(&temp_path, output)?;
     Ok(())
 }
 
@@ -846,6 +1195,7 @@ fn download_directory_recursive(
     remote_dir: &str,
     local_dir: &Path,
     listing: ListResponse,
+    connections: u8,
 ) -> Result<()> {
     fs::create_dir_all(local_dir)
         .with_context(|| format!("failed to create directory {}", local_dir.display()))?;
@@ -858,9 +1208,16 @@ fn download_directory_recursive(
             child_remote = ensure_trailing_slash(&child_remote);
             let child_listing = fetch_listing_optional(client, host, &child_remote)?
                 .ok_or_else(|| anyhow::anyhow!("failed to list directory {}", child_remote))?;
-            download_directory_recursive(client, host, &child_remote, &child_local, child_listing)?;
+            download_directory_recursive(
+                client,
+                host,
+                &child_remote,
+                &child_local,
+                child_listing,
+                connections,
+            )?;
         } else {
-            download_file(client, host, &child_remote, &child_local)?;
+            download_file(client, host, &child_remote, &child_local, connections)?;
         }
     }
 
