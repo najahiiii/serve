@@ -6,7 +6,7 @@ use axum::{
     Router,
     body::Body,
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
-    http::{Extensions, HeaderMap, HeaderValue, StatusCode, Uri, Version, header},
+    http::{Extensions, HeaderMap, HeaderValue, StatusCode, Version, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -525,7 +525,6 @@ async fn serve_file(
 async fn handle_upload(
     State(state): State<AppState>,
     headers: HeaderMap,
-    uri: Uri,
     Query(query): Query<UploadQuery>,
     mut multipart: Multipart,
 ) -> Result<Response, AppError> {
@@ -659,7 +658,7 @@ async fn handle_upload(
             .to_string_lossy()
             .replace(std::path::MAIN_SEPARATOR, "/");
 
-    let base_url = build_base_url(&headers);
+        let base_url = build_base_url(&headers);
 
         saved_file = Some(UploadResponse {
             name: safe_name,
