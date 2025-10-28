@@ -14,7 +14,7 @@ dist:
 	mkdir -p $(DIST_DIR)
 
 go: dist
-	cd serve-go && GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o ../$(DIST_DIR)/$(GO_BIN)
+	cd serve-go && GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags "-s -w" -o ../$(DIST_DIR)/$(GO_BIN)
 
 rust: dist
 	cargo build --manifest-path serve-rs/Cargo.toml --release
