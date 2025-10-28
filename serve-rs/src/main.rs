@@ -11,7 +11,7 @@ use axum::{
     routing::{get, post},
 };
 use chrono::{Datelike, Local};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use config::Config;
 use html_escape::encode_text;
 use mime_guess::MimeGuess;
@@ -63,28 +63,33 @@ struct Cli {
     command: Command,
 }
 
+#[derive(Args, Clone)]
+struct RunArgs {
+    /// Path to configuration file (TOML format)
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+    /// Override listening port (defaults to env/config)
+    #[arg(long, value_name = "PORT")]
+    port: Option<u16>,
+    /// Override upload token
+    #[arg(long, value_name = "TOKEN")]
+    upload_token: Option<String>,
+    /// Override maximum upload size in bytes
+    #[arg(long, value_name = "BYTES")]
+    max_file_size: Option<u64>,
+    /// Override root directory to serve
+    #[arg(long, value_name = "PATH")]
+    root: Option<PathBuf>,
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Run the HTTP file server
-    Run {
-        /// Path to configuration file (TOML format)
-        #[arg(long, value_name = "FILE")]
-        config: Option<PathBuf>,
-        /// Override listening port (defaults to env/config)
-        #[arg(long, value_name = "PORT")]
-        port: Option<u16>,
-        /// Override upload token
-        #[arg(long, value_name = "TOKEN")]
-        upload_token: Option<String>,
-        /// Override maximum upload size in bytes
-        #[arg(long, value_name = "BYTES")]
-        max_file_size: Option<u64>,
-        /// Override root directory to serve
-        #[arg(long, value_name = "PATH")]
-        root: Option<PathBuf>,
-    },
+    Run(RunArgs),
     /// Generate a default configuration file at $HOME/.config/serve/config.toml
     InitConfig,
+    /// Print the effective configuration and exit
+    ShowConfig(RunArgs),
 }
 
 #[derive(Clone)]
@@ -103,51 +108,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     match Cli::parse().command {
-        Command::Run {
-            config,
-            port,
-            upload_token,
-            max_file_size,
-            root,
-        } => run_server(config, port, upload_token, max_file_size, root)
+        Command::Run(args) => run_server(args)
             .await
             .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?,
         Command::InitConfig => init_config_file()?,
+        Command::ShowConfig(args) => show_config(args)?,
     }
 
     Ok(())
 }
 
-async fn run_server(
-    config_path: Option<PathBuf>,
-    port_override: Option<u16>,
-    upload_token_override: Option<String>,
-    max_file_size_override: Option<u64>,
-    root_override: Option<PathBuf>,
-) -> Result<(), AppError> {
+fn effective_config(args: &RunArgs) -> Result<(Config, PathBuf), AppError> {
     let mut config =
-        Config::load(config_path.as_deref()).map_err(|err| AppError::Config(err.to_string()))?;
+        Config::load(args.config.as_deref()).map_err(|err| AppError::Config(err.to_string()))?;
 
-    if let Some(port) = port_override {
+    if let Some(port) = args.port {
         config.port = port;
     }
-    if let Some(token) = upload_token_override {
+    if let Some(token) = args.upload_token.clone() {
         config.upload_token = token;
     }
-    if let Some(size) = max_file_size_override {
+    if let Some(size) = args.max_file_size {
         config.max_file_size = size;
     }
-    if let Some(root) = root_override {
+    if let Some(root) = args.root.clone() {
         config.root_override = Some(root);
     }
 
     let base_root = config
         .root_override
         .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let canonical_root = base_root
         .canonicalize()
         .map_err(|_| AppError::Internal("Failed to resolve root directory".to_string()))?;
+
+    Ok((config, canonical_root))
+}
+
+async fn run_server(args: RunArgs) -> Result<(), AppError> {
+    let (config, canonical_root) = effective_config(&args)?;
 
     let body_limit = config
         .max_file_size
@@ -218,6 +218,62 @@ async fn run_server(
         error!("Server error: {}", err);
         AppError::Internal("Server error".to_string())
     })
+}
+
+fn show_config(args: RunArgs) -> Result<(), AppError> {
+    let (config, canonical_root) = effective_config(&args)?;
+
+    println!("serve-rs {}", env!("CARGO_PKG_VERSION"));
+    println!(
+        "Config file    : {}",
+        args.config
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<auto-discovery>".to_string())
+    );
+    println!("Port           : {}", config.port);
+    println!("Root (effective): {}", canonical_root.display());
+    println!(
+        "Root override  : {}",
+        config
+            .root_override
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<not set>".to_string())
+    );
+    println!(
+        "Upload token   : {}",
+        if config.upload_token.is_empty() {
+            "<not set>".to_string()
+        } else {
+            config.upload_token.clone()
+        }
+    );
+    println!("Max file size  : {} bytes", config.max_file_size);
+
+    let mut hidden: Vec<_> = config.blacklisted_files.iter().cloned().collect();
+    hidden.sort();
+    println!(
+        "Hidden entries : {}",
+        if hidden.is_empty() {
+            "-".to_string()
+        } else {
+            hidden.join(", ")
+        }
+    );
+
+    let mut extensions: Vec<_> = config.allowed_extensions.iter().cloned().collect();
+    extensions.sort();
+    println!(
+        "Allowed ext    : {}",
+        if extensions.is_empty() {
+            "-".to_string()
+        } else {
+            extensions.join(", ")
+        }
+    );
+
+    Ok(())
 }
 
 async fn get_root(

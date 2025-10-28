@@ -69,6 +69,8 @@ enum Command {
     },
     /// Interactive configuration helper
     Setup,
+    /// Display the currently configured defaults
+    Config,
 }
 
 #[derive(Deserialize)]
@@ -132,9 +134,17 @@ struct AppConfig {
     allow_no_ext: Option<bool>,
 }
 
+#[derive(Debug, Clone)]
+struct LoadedConfig {
+    source: Option<PathBuf>,
+    existed: bool,
+    data: AppConfig,
+}
+
 fn main() -> Result<()> {
     let Cli { config, command } = Cli::parse();
-    let app_config = load_config(config.as_deref())?;
+    let loaded_config = load_config(config.as_deref())?;
+    let app_config = loaded_config.data.clone();
 
     match command {
         Command::List { host, path } => {
@@ -170,30 +180,45 @@ fn main() -> Result<()> {
             download(&resolved_host, &path, out, recursive)
         }
         Command::Setup => run_setup(config.as_deref(), &app_config),
+        Command::Config => show_config(&loaded_config, config.as_deref()),
     }
 }
 
-fn load_config(path_override: Option<&Path>) -> Result<AppConfig> {
+fn load_config(path_override: Option<&Path>) -> Result<LoadedConfig> {
     if let Some(path) = path_override {
-        return load_config_from_path(path);
+        let (config, existed) = load_config_from_path(path)?;
+        return Ok(LoadedConfig {
+            source: Some(path.to_path_buf()),
+            existed,
+            data: config,
+        });
     }
 
     if let Some(default_path) = default_config_path() {
-        load_config_from_path(&default_path)
+        let (config, existed) = load_config_from_path(&default_path)?;
+        Ok(LoadedConfig {
+            source: Some(default_path),
+            existed,
+            data: config,
+        })
     } else {
-        Ok(AppConfig::default())
+        Ok(LoadedConfig {
+            source: None,
+            existed: false,
+            data: AppConfig::default(),
+        })
     }
 }
 
-fn load_config_from_path(path: &Path) -> Result<AppConfig> {
+fn load_config_from_path(path: &Path) -> Result<(AppConfig, bool)> {
     if path.exists() {
         let content = fs::read_to_string(path)
             .with_context(|| format!("failed to read config file {}", path.display()))?;
         let config: AppConfig = toml::from_str(&content)
             .with_context(|| format!("failed to parse config file {}", path.display()))?;
-        Ok(config)
+        Ok((config, true))
     } else {
-        Ok(AppConfig::default())
+        Ok((AppConfig::default(), false))
     }
 }
 
@@ -339,6 +364,47 @@ fn prompt_bool(prompt: &str, default: bool) -> Result<bool> {
             }
         }
     }
+}
+
+fn show_config(loaded: &LoadedConfig, override_path: Option<&Path>) -> Result<()> {
+    let effective_host = resolve_host(None, &loaded.data);
+    let effective_path = resolve_upload_path(None, &loaded.data);
+    let allow = effective_allow_no_ext(false, &loaded.data);
+
+    if let Some(path) = override_path {
+        println!("--config arg    : {}", path.display());
+    }
+
+    match &loaded.source {
+        Some(path) => {
+            if loaded.existed {
+                println!("Config file     : {} (loaded)", path.display());
+            } else {
+                println!(
+                    "Config file     : {} (missing, using defaults)",
+                    path.display()
+                );
+            }
+        }
+        None => println!("Config file     : <none> (built-in defaults)"),
+    }
+
+    println!("Effective host  : {}", effective_host);
+    println!(
+        "Default token   : {}",
+        loaded
+            .data
+            .token
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("<not set>")
+    );
+    println!(
+        "Default path    : {}",
+        effective_path.as_deref().unwrap_or("<not set>")
+    );
+    println!("Allow no ext    : {}", allow);
+    Ok(())
 }
 
 fn list(host: &str, path: &str) -> Result<()> {

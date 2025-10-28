@@ -14,3 +14,16 @@ tabled = "0.15"
 indicatif = "0.17"
 directories = "5"
 toml = "0.8"
+
+[profile.release]
+opt-level = "s"
+debug = false
+split-debuginfo = '...'
+strip = "symbols"
+debug-assertions = false
+overflow-checks = false
+lto = true
+panic = 'unwind'
+incremental = false
+codegen-units = 16
+rpath = true

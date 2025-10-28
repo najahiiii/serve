@@ -56,6 +56,10 @@ func main() {
 		if err := initConfig(); err != nil {
 			log.Fatal(err)
 		}
+	case "config":
+		if err := configCommand(args[1:]); err != nil {
+			log.Fatal(err)
+		}
 	case "help", "--help", "-h":
 		printUsage()
 	case "--version", "-v":
@@ -73,6 +77,23 @@ func main() {
 }
 
 func runCommand(args []string) error {
+	cfg, _, err := loadConfigWithOverrides(args)
+	if err != nil {
+		return err
+	}
+	return runServer(cfg)
+}
+
+func configCommand(args []string) error {
+	cfg, configPath, err := loadConfigWithOverrides(args)
+	if err != nil {
+		return err
+	}
+	describeConfig(cfg, configPath)
+	return nil
+}
+
+func loadConfigWithOverrides(args []string) (Config, string, error) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	configPath := fs.String("config", "", "Path to configuration file (TOML)")
 	portOverride := fs.Int("port", 0, "Override listening port")
@@ -83,12 +104,12 @@ func runCommand(args []string) error {
 	hideOverride := fs.String("hide", "", "Comma-separated hidden files/directories")
 
 	if err := fs.Parse(args); err != nil {
-		return err
+		return Config{}, "", err
 	}
 
 	cfg, err := LoadConfig(*configPath)
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+		return Config{}, "", fmt.Errorf("load config: %w", err)
 	}
 
 	if *portOverride > 0 {
@@ -110,7 +131,7 @@ func runCommand(args []string) error {
 		cfg.BlacklistedFiles = normalizeList(splitTrim(*hideOverride, ","))
 	}
 
-	return runServer(cfg)
+	return cfg, *configPath, nil
 }
 
 func runServer(cfg Config) error {
@@ -147,6 +168,45 @@ func runServer(cfg Config) error {
 	return server.ListenAndServe()
 }
 
+func describeConfig(cfg Config, configPath string) {
+	absRoot, err := filepath.Abs(cfg.Root)
+	if err != nil {
+		absRoot = cfg.Root
+	}
+
+	fmt.Printf("serve-go %s\n", version)
+	if configPath != "" {
+		fmt.Printf("Config file    : %s\n", configPath)
+	} else {
+		fmt.Println("Config file    : <auto-discovery>")
+	}
+	fmt.Printf("Port           : %d\n", cfg.Port)
+	fmt.Printf("Root (effective): %s\n", absRoot)
+	fmt.Printf("Root setting   : %s\n", cfg.Root)
+	if cfg.UploadToken == "" {
+		fmt.Println("Upload token   : <not set>")
+	} else {
+		fmt.Printf("Upload token   : %s\n", cfg.UploadToken)
+	}
+	fmt.Printf("Max file size  : %d bytes\n", cfg.MaxFileSize)
+
+	hidden := slices.Clone(cfg.BlacklistedFiles)
+	slices.Sort(hidden)
+	if len(hidden) == 0 {
+		fmt.Println("Hidden entries : -")
+	} else {
+		fmt.Printf("Hidden entries : %s\n", strings.Join(hidden, ", "))
+	}
+
+	ext := slices.Clone(cfg.AllowedExtensions)
+	slices.Sort(ext)
+	if len(ext) == 0 {
+		fmt.Println("Allowed ext    : -")
+	} else {
+		fmt.Printf("Allowed ext    : %s\n", strings.Join(ext, ", "))
+	}
+}
+
 func printUsage() {
 	fmt.Println(`Usage: serve-go <command> [options]
 
@@ -162,7 +222,8 @@ Options:
 
 Commands:
 	run               Start the HTTP file server
-	init-config       Generate default config at $HOME/.config/serve/config.toml`)
+	init-config       Generate default config at $HOME/.config/serve/config.toml
+	config            Print effective configuration and exit`)
 }
 
 func withCommonHeaders(h http.HandlerFunc) http.HandlerFunc {
