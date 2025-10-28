@@ -216,12 +216,15 @@ func indexOrFile(w http.ResponseWriter, r *http.Request) {
 }
 
 type entry struct {
+	Index       int
 	Name        string
 	DisplayName string
 	SizeHuman   string
+	SizeBytes   int64
 	ModHuman    string
 	IsDir       bool
 	URL         string
+	Mime        string
 }
 
 var dirT = template.Must(template.ParseFS(tplFS, "_tpl/index.html"))
@@ -253,18 +256,27 @@ func listDir(w http.ResponseWriter, r *http.Request, absPath, rel string) {
 			urlPath += "/"
 			displayName += "/"
 		}
+		sizeBytes := int64(0)
 		sizeHuman := "-"
+		mimeType := "inode/directory"
 		if !isDir {
-			sizeHuman = formatBytes(e.Size())
+			sizeBytes = e.Size()
+			sizeHuman = formatBytes(sizeBytes)
+			mimeType = mime.TypeByExtension(strings.ToLower(filepath.Ext(name)))
+			if mimeType == "" {
+				mimeType = "application/octet-stream"
+			}
 		}
 		modHuman := e.ModTime().Local().Format("2006-01-02 15:04:05")
 		list = append(list, entry{
 			Name:        name,
 			DisplayName: displayName,
 			SizeHuman:   sizeHuman,
+			SizeBytes:   sizeBytes,
 			ModHuman:    modHuman,
 			IsDir:       isDir,
 			URL:         urlPath,
+			Mime:        mimeType,
 		})
 	}
 
@@ -277,6 +289,51 @@ func listDir(w http.ResponseWriter, r *http.Request, absPath, rel string) {
 		}
 		return strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
 	})
+
+	for i := range list {
+		list[i].Index = i + 1
+	}
+
+	if strings.EqualFold(r.Header.Get("X-Serve-Client"), "serve-cli") {
+		scheme := schemeFromRequest(r)
+		base := fmt.Sprintf("%s://%s", scheme, r.Host)
+		relPath := strings.TrimPrefix(rel, "/")
+		jsonPath := "/"
+		if relPath != "" {
+			jsonPath = "/" + relPath
+			if !strings.HasSuffix(jsonPath, "/") {
+				jsonPath += "/"
+			}
+		}
+
+		entriesJSON := make([]map[string]any, 0, len(list))
+		for _, item := range list {
+			relURL := buildItemURL(rel, item.Name, item.IsDir)
+			absolute := base + relURL
+			entriesJSON = append(entriesJSON, map[string]any{
+				"name":       item.Name,
+				"size":       item.SizeHuman,
+				"size_bytes": item.SizeBytes,
+				"modified":   item.ModHuman,
+				"url":        absolute,
+				"is_dir":     item.IsDir,
+				"mime_type":  item.Mime,
+			})
+		}
+
+		resp := map[string]any{
+			"path":       jsonPath,
+			"entries":    entriesJSON,
+			"powered_by": poweredBy,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Powered-By", poweredBy)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			http.Error(w, "failed to encode json", http.StatusInternalServerError)
+		}
+		return
+	}
 
 	trimmed := strings.TrimSuffix(rel, "/")
 	directory := r.Host
@@ -496,6 +553,18 @@ func userAgent(r *http.Request) string {
 		return "unknown"
 	}
 	return ua
+}
+
+func buildItemURL(current, name string, isDir bool) string {
+	trimmed := strings.TrimPrefix(current, "/")
+	joined := path.Join(trimmed, name)
+	joined = strings.TrimPrefix(joined, "/")
+	if isDir {
+		if joined != "" && !strings.HasSuffix(joined, "/") {
+			joined += "/"
+		}
+	}
+	return "/" + strings.TrimPrefix(joined, "/")
 }
 
 func formatBytes(size int64) string {

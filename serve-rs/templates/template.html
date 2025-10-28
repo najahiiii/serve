@@ -28,10 +28,16 @@
         th:hover, td:hover {
             text-decoration: underline
         }
+        .index {
+            text-align: right
+        }
         .file-name {
             text-align: left
         }
         .file-size {
+            text-align: center
+        }
+        .mime {
             text-align: center
         }
         .date {
@@ -59,8 +65,10 @@
     <h1>Index of {{ directory }}</h1>
     <table>
         <tr>
+            <th class="index">#</th>
             <th class="file-name">Name</th>
             <th class="file-size">Size</th>
+            <th class="mime">MIME</th>
             <th class="date">Last Modified</th>
         </tr>
         {{ rows }}

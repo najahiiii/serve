@@ -13,6 +13,7 @@ use axum::{
 use chrono::{Datelike, Local};
 use clap::{Parser, Subcommand};
 use config::Config;
+use html_escape::encode_text;
 use mime_guess::MimeGuess;
 use pathdiff::diff_paths;
 use serde::Deserialize;
@@ -326,58 +327,130 @@ async fn render_directory(
                 continue;
             }
         };
+        let is_dir = child_metadata.is_dir();
+        let display_name = if is_dir {
+            format!("{}/", file_name)
+        } else {
+            file_name.clone()
+        };
+        let link = entry_link(requested_path, &file_name);
+        let relative_url = encode_link(&link);
+        let size_bytes = if is_dir { 0 } else { child_metadata.len() };
+        let size_display = if is_dir {
+            "-".to_string()
+        } else {
+            format_size(size_bytes)
+        };
+        let modified_local: chrono::DateTime<Local> = modified.into();
+        let modified_display = format_modified_time(modified_local);
+        let mime_type = if is_dir {
+            "inode/directory".to_string()
+        } else {
+            MimeGuess::from_path(&child_path)
+                .first_raw()
+                .unwrap_or("application/octet-stream")
+                .to_string()
+        };
 
         entries.push(DirectoryEntry {
             name: file_name,
-            is_dir: child_metadata.is_dir(),
-            size: child_metadata.len(),
-            modified,
+            display_name,
+            relative_url,
+            size_bytes,
+            size_display,
+            modified_display,
+            is_dir,
+            mime_type,
         });
     }
 
     entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+    if headers
+        .get("X-Serve-Client")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.eq_ignore_ascii_case("serve-cli"))
+        .unwrap_or(false)
+    {
+        let base_url = build_base_url(headers, &Uri::from_static(""));
+        let base_trimmed = base_url.trim_end_matches('/');
+        let entries_json: Vec<_> = entries
+            .iter()
+            .enumerate()
+            .map(|(idx, entry)| {
+                let absolute = format!("{}{}", base_trimmed, entry.relative_url);
+                serde_json::json!({
+                    "index": idx + 1,
+                    "name": entry.name,
+                    "size": entry.size_display,
+                    "size_bytes": entry.size_bytes,
+                    "modified": entry.modified_display,
+                    "url": absolute,
+                    "is_dir": entry.is_dir,
+                    "mime_type": entry.mime_type,
+                })
+            })
+            .collect();
+
+        let mut normalized_path = if requested_path.is_empty() {
+            "/".to_string()
+        } else {
+            let mut p = format!("/{}", requested_path.trim_start_matches('/'));
+            if !p.ends_with('/') {
+                p.push('/');
+            }
+            p
+        };
+        if normalized_path.is_empty() {
+            normalized_path = "/".to_string();
+        }
+
+        let payload = serde_json::json!({
+            "path": normalized_path,
+            "entries": entries_json,
+            "powered_by": POWERED_BY,
+        });
+
+        let body =
+            serde_json::to_vec(&payload).map_err(|err| AppError::Internal(err.to_string()))?;
+
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+            .header("X-Powered-By", POWERED_BY)
+            .body(Body::from(body))
+            .unwrap());
+    }
 
     let mut rows = String::new();
     if let Some(parent_link) = parent_link(requested_path) {
         rows.push_str(&format!(
             r#"
                 <tr>
-                    <td colspan="3"><a href="{}">..</a></td>
+                    <td colspan="5"><a href="{}">..</a></td>
                 </tr>
             "#,
             encode_link(&parent_link)
         ));
     }
 
-    for entry in entries {
-        let display_name = if entry.is_dir {
-            format!("{}/", entry.name)
-        } else {
-            entry.name.clone()
-        };
-
-        let link = entry_link(requested_path, &entry.name);
-        let file_size = if entry.is_dir {
-            "-".to_string()
-        } else {
-            format_size(entry.size)
-        };
-
-        let modified_local: chrono::DateTime<Local> = entry.modified.into();
-        let modified = format_modified_time(modified_local);
-
+    for (idx, entry) in entries.iter().enumerate() {
         rows.push_str(&format!(
             r#"
                 <tr>
+                    <td class="index">{index}</td>
                     <td class="file-name"><a href="{link}">{display}</a></td>
                     <td class="file-size">{size}</td>
+                    <td class="mime">{mime}</td>
                     <td class="date">{modified}</td>
                 </tr>
             "#,
-            link = encode_link(&link),
-            display = display_name,
-            size = file_size,
-            modified = modified
+            index = idx + 1,
+            link = entry.relative_url,
+            display = encode_text(&entry.display_name),
+            size = entry.size_display,
+            mime = encode_text(&entry.mime_type),
+            modified = entry.modified_display
         ));
     }
 
@@ -766,9 +839,13 @@ fn map_io_error(err: io::Error) -> AppError {
 #[derive(Debug)]
 struct DirectoryEntry {
     name: String,
+    display_name: String,
+    relative_url: String,
+    size_bytes: u64,
+    size_display: String,
+    modified_display: String,
     is_dir: bool,
-    size: u64,
-    modified: std::time::SystemTime,
+    mime_type: String,
 }
 
 #[derive(Debug)]

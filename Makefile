@@ -4,7 +4,7 @@ RUST_BIN := serve-rs
 PREFIX ?= /usr/local
 BIN_DIR := $(PREFIX)/bin
 
-.PHONY: all build go rust clean dist
+.PHONY: all build go rust clean dist go-debug
 
 all: build
 
@@ -15,6 +15,9 @@ dist:
 
 go: dist
 	cd serve-go && GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags "-s -w" -o ../$(DIST_DIR)/$(GO_BIN)
+
+go-debug: dist
+	cd serve-go && GOOS=$(GOOS) GOARCH=$(GOARCH) go build -gcflags="all=-N -l" -o ../$(DIST_DIR)/$(GO_BIN)
 
 rust: dist
 	cargo build --manifest-path serve-rs/Cargo.toml --release

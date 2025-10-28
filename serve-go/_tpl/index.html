@@ -30,10 +30,16 @@
         th:hover, td:hover {
             text-decoration: underline;
         }
+        .index {
+            text-align: right;
+        }
         .file-name {
             text-align: left;
         }
         .file-size {
+            text-align: center;
+        }
+        .mime {
             text-align: center;
         }
         .date {
@@ -59,19 +65,23 @@
     <h1>Index of {{.Directory}}</h1>
     <table>
         <tr>
+            <th class="index">#</th>
             <th class="file-name">Name</th>
             <th class="file-size">Size</th>
+            <th class="mime">MIME</th>
             <th class="date">Last Modified</th>
         </tr>
         {{if .ParentURL}}
         <tr>
-            <td colspan="3"><a href="{{.ParentURL}}">..</a></td>
+            <td colspan="5"><a href="{{.ParentURL}}">..</a></td>
         </tr>
         {{end}}
         {{range .Items}}
         <tr>
+            <td class="index">{{.Index}}</td>
             <td class="file-name"><a href="{{.URL}}">{{.DisplayName}}</a></td>
             <td class="file-size">{{.SizeHuman}}</td>
+            <td class="mime">{{.Mime}}</td>
             <td class="date">{{.ModHuman}}</td>
         </tr>
         {{end}}
