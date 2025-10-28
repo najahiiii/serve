@@ -24,7 +24,7 @@ use std::{
     sync::Arc,
 };
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 use tower::ServiceBuilder;
 use tower_http::{
@@ -534,9 +534,44 @@ async fn serve_file(
     metadata: std::fs::Metadata,
     view: bool,
 ) -> Result<Response, AppError> {
-    let file = fs::File::open(&full_path).await.map_err(map_io_error)?;
-    let stream = ReaderStream::with_capacity(file, STREAM_BUFFER_BYTES);
-    let body = Body::from_stream(stream);
+    let mut file = fs::File::open(&full_path).await.map_err(map_io_error)?;
+    let file_size = metadata.len();
+    let mut status = StatusCode::OK;
+    let mut content_length = file_size;
+    let mut content_range: Option<HeaderValue> = None;
+
+    let body = if let Some(range_value) = headers.get(header::RANGE) {
+        let range_str = range_value.to_str().unwrap_or("");
+        match parse_range_header(range_str, file_size) {
+            Ok(Some((start, end))) => {
+                status = StatusCode::PARTIAL_CONTENT;
+                content_length = end.saturating_sub(start).saturating_add(1);
+                file.seek(io::SeekFrom::Start(start))
+                    .await
+                    .map_err(map_io_error)?;
+                let limited = file.take(content_length);
+                content_range = Some(
+                    HeaderValue::from_str(&format!("bytes {}-{}/{}", start, end, file_size))
+                        .unwrap(),
+                );
+                Body::from_stream(ReaderStream::with_capacity(limited, STREAM_BUFFER_BYTES))
+            }
+            Ok(None) => Body::from_stream(ReaderStream::with_capacity(file, STREAM_BUFFER_BYTES)),
+            Err(_) => {
+                let mut response = Response::builder()
+                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header(header::CONTENT_RANGE, format!("bytes */{}", file_size))
+                    .body(Body::empty())
+                    .unwrap();
+                response
+                    .headers_mut()
+                    .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+                return Ok(response);
+            }
+        }
+    } else {
+        Body::from_stream(ReaderStream::with_capacity(file, STREAM_BUFFER_BYTES))
+    };
 
     let mime = MimeGuess::from_path(&full_path)
         .first_or_octet_stream()
@@ -549,7 +584,7 @@ async fn serve_file(
         .unwrap_or("download");
 
     let mut response = Response::builder()
-        .status(StatusCode::OK)
+        .status(status)
         .header(header::CONTENT_TYPE, mime)
         .header(
             header::CONTENT_DISPOSITION,
@@ -561,11 +596,14 @@ async fn serve_file(
     // Set Content-Length when available.
     response.headers_mut().insert(
         header::CONTENT_LENGTH,
-        HeaderValue::from_str(&metadata.len().to_string()).unwrap(),
+        HeaderValue::from_str(&content_length.to_string()).unwrap(),
     );
     response
         .headers_mut()
         .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if let Some(value) = content_range {
+        response.headers_mut().insert(header::CONTENT_RANGE, value);
+    }
 
     let path_display = if requested_path.is_empty() {
         "/".to_string()
@@ -581,6 +619,50 @@ async fn serve_file(
     );
 
     Ok(response)
+}
+
+fn parse_range_header(value: &str, size: u64) -> Result<Option<(u64, u64)>, ()> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(());
+    }
+    if !trimmed.starts_with("bytes=") {
+        return Ok(None);
+    }
+
+    let spec = trimmed[6..].trim();
+    if spec.is_empty() || spec.contains(',') {
+        return Err(());
+    }
+
+    let (start_part, end_part) = spec.split_once('-').ok_or(())?;
+    let start_part = start_part.trim();
+    let end_part = end_part.trim();
+
+    if start_part.is_empty() {
+        if end_part.is_empty() {
+            return Err(());
+        }
+        let suffix: u64 = end_part.parse().map_err(|_| ())?;
+        if suffix == 0 || size == 0 {
+            return Err(());
+        }
+        let length = suffix.min(size);
+        let start = size - length;
+        let end = size - 1;
+        Ok(Some((start, end)))
+    } else {
+        let start: u64 = start_part.parse().map_err(|_| ())?;
+        let end = if end_part.is_empty() {
+            size.checked_sub(1).ok_or(())?
+        } else {
+            end_part.parse().map_err(|_| ())?
+        };
+        if start > end || end >= size {
+            return Err(());
+        }
+        Ok(Some((start, end)))
+    }
 }
 
 async fn handle_upload(
