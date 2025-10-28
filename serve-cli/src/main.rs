@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use directories::ProjectDirs;
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::StatusCode;
 use reqwest::Url;
 use reqwest::blocking::{Client, Response, multipart};
 use reqwest::header::ACCEPT;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -21,6 +22,9 @@ const CLIENT_HEADER_VALUE: &str = "serve-cli";
     about = "CLI helper for serve-go & serve-rs file servers"
 )]
 struct Cli {
+    /// Path to custom configuration file
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -30,29 +34,29 @@ enum Command {
     /// List directory contents from the server
     List {
         /// Base host URL (e.g. https://files.example.com)
-        #[arg(long, default_value = DEFAULT_HOST)]
-        host: String,
+        #[arg(long)]
+        host: Option<String>,
         /// Path to list (e.g. / or dir/subdir)
         #[arg(long, default_value = "/")]
         path: String,
     },
     /// Upload a file to the server
     Upload {
-        #[arg(long, default_value = DEFAULT_HOST)]
-        host: String,
+        #[arg(long)]
+        host: Option<String>,
         #[arg(long)]
         file: String,
         #[arg(long)]
-        token: String,
-        #[arg(long, default_value = "")]
-        upload_path: String,
+        token: Option<String>,
+        #[arg(long)]
+        upload_path: Option<String>,
         #[arg(long, default_value_t = false)]
         allow_no_ext: bool,
     },
     /// Download a file from the server
     Download {
-        #[arg(long, default_value = DEFAULT_HOST)]
-        host: String,
+        #[arg(long)]
+        host: Option<String>,
         /// Remote file path (e.g. /dir/archive.tar)
         #[arg(long)]
         path: String,
@@ -63,6 +67,8 @@ enum Command {
         #[arg(long, default_value_t = false)]
         recursive: bool,
     },
+    /// Interactive configuration helper
+    Setup,
 }
 
 #[derive(Deserialize)]
@@ -116,23 +122,222 @@ struct TableEntry {
     url: String,
 }
 
+const CONFIG_FILE_NAME: &str = "serve-cli.toml";
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct AppConfig {
+    host: Option<String>,
+    token: Option<String>,
+    upload_path: Option<String>,
+    allow_no_ext: Option<bool>,
+}
+
 fn main() -> Result<()> {
-    let cli = Cli::parse();
-    match cli.command {
-        Command::List { host, path } => list(&host, &path),
+    let Cli { config, command } = Cli::parse();
+    let app_config = load_config(config.as_deref())?;
+
+    match command {
+        Command::List { host, path } => {
+            let resolved_host = resolve_host(host, &app_config);
+            list(&resolved_host, &path)
+        }
         Command::Upload {
             host,
             file,
             token,
             upload_path,
             allow_no_ext,
-        } => upload(&host, &file, &token, &upload_path, allow_no_ext),
+        } => {
+            let resolved_host = resolve_host(host, &app_config);
+            let resolved_token = resolve_token(token, &app_config)?;
+            let resolved_path = resolve_upload_path(upload_path, &app_config);
+            let effective_allow = effective_allow_no_ext(allow_no_ext, &app_config);
+            upload(
+                &resolved_host,
+                &file,
+                &resolved_token,
+                resolved_path.as_deref(),
+                effective_allow,
+            )
+        }
         Command::Download {
             host,
             path,
             out,
             recursive,
-        } => download(&host, &path, out, recursive),
+        } => {
+            let resolved_host = resolve_host(host, &app_config);
+            download(&resolved_host, &path, out, recursive)
+        }
+        Command::Setup => run_setup(config.as_deref(), &app_config),
+    }
+}
+
+fn load_config(path_override: Option<&Path>) -> Result<AppConfig> {
+    if let Some(path) = path_override {
+        return load_config_from_path(path);
+    }
+
+    if let Some(default_path) = default_config_path() {
+        load_config_from_path(&default_path)
+    } else {
+        Ok(AppConfig::default())
+    }
+}
+
+fn load_config_from_path(path: &Path) -> Result<AppConfig> {
+    if path.exists() {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("failed to read config file {}", path.display()))?;
+        let config: AppConfig = toml::from_str(&content)
+            .with_context(|| format!("failed to parse config file {}", path.display()))?;
+        Ok(config)
+    } else {
+        Ok(AppConfig::default())
+    }
+}
+
+fn default_config_path() -> Option<PathBuf> {
+    ProjectDirs::from("", "", "serve").map(|dirs| dirs.config_dir().join(CONFIG_FILE_NAME))
+}
+
+fn config_path_for_write(path_override: Option<&Path>) -> Result<PathBuf> {
+    if let Some(path) = path_override {
+        Ok(path.to_path_buf())
+    } else if let Some(path) = default_config_path() {
+        Ok(path)
+    } else {
+        anyhow::bail!("unable to determine configuration directory");
+    }
+}
+
+fn resolve_host(host_arg: Option<String>, config: &AppConfig) -> String {
+    host_arg
+        .or_else(|| config.host.clone())
+        .unwrap_or_else(|| DEFAULT_HOST.to_string())
+}
+
+fn resolve_token(token_arg: Option<String>, config: &AppConfig) -> Result<String> {
+    let candidate = token_arg.or_else(|| config.token.clone());
+    match candidate {
+        Some(value) if !value.trim().is_empty() => Ok(value),
+        _ => Err(anyhow::anyhow!(
+            "upload token is required; pass --token or set it in config"
+        )),
+    }
+}
+
+fn resolve_upload_path(path_arg: Option<String>, config: &AppConfig) -> Option<String> {
+    path_arg.or_else(|| config.upload_path.clone())
+}
+
+fn effective_allow_no_ext(flag: bool, config: &AppConfig) -> bool {
+    if flag {
+        true
+    } else {
+        config.allow_no_ext.unwrap_or(false)
+    }
+}
+
+fn run_setup(path_override: Option<&Path>, current: &AppConfig) -> Result<()> {
+    let config_path = config_path_for_write(path_override)?;
+    let host_default = current.host.as_deref().unwrap_or(DEFAULT_HOST);
+    let host = prompt_with_default("Server base URL", host_default)?;
+    let token = prompt_optional("Default upload token", current.token.as_deref())?;
+    let upload_path = prompt_optional(
+        "Default upload path (blank to skip)",
+        current.upload_path.as_deref(),
+    )?;
+    let allow_no_ext = prompt_bool(
+        "Allow uploads without extension by default",
+        current.allow_no_ext.unwrap_or(false),
+    )?;
+
+    let mut new_config = AppConfig::default();
+    new_config.host = Some(host);
+    new_config.token = token;
+    new_config.upload_path = upload_path;
+    new_config.allow_no_ext = Some(allow_no_ext);
+
+    if let Some(parent) = config_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create config directory {}", parent.display())
+            })?;
+        }
+    }
+
+    let toml_string =
+        toml::to_string_pretty(&new_config).context("failed to serialize configuration")?;
+    fs::write(&config_path, toml_string)
+        .with_context(|| format!("failed to write config file {}", config_path.display()))?;
+
+    println!("Saved configuration to {}", config_path.display());
+    println!("Tip: pass --config to use a different configuration path.");
+    Ok(())
+}
+
+fn prompt_with_default(prompt: &str, default: &str) -> Result<String> {
+    loop {
+        print!("{} [{}]: ", prompt, default);
+        io::stdout().flush().context("failed to flush stdout")?;
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("failed to read input")?;
+        let value = input.trim();
+        if value.is_empty() {
+            return Ok(default.to_string());
+        }
+        return Ok(value.to_string());
+    }
+}
+
+fn prompt_optional(prompt: &str, current: Option<&str>) -> Result<Option<String>> {
+    loop {
+        match current {
+            Some(existing) if !existing.is_empty() => {
+                print!("{} [{}] (blank to keep, '-' to clear): ", prompt, existing)
+            }
+            Some(_) => print!("{} (blank to keep, '-' to clear): ", prompt),
+            None => print!("{} (blank to skip): ", prompt),
+        }
+        io::stdout().flush().context("failed to flush stdout")?;
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("failed to read input")?;
+        let value = input.trim();
+        if value.is_empty() {
+            return Ok(current.map(|s| s.to_string()));
+        }
+        if value == "-" {
+            return Ok(None);
+        }
+        return Ok(Some(value.to_string()));
+    }
+}
+
+fn prompt_bool(prompt: &str, default: bool) -> Result<bool> {
+    let hint = if default { "Y/n" } else { "y/N" };
+    loop {
+        print!("{} [{}]: ", prompt, hint);
+        io::stdout().flush().context("failed to flush stdout")?;
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("failed to read input")?;
+        let value = input.trim().to_lowercase();
+        if value.is_empty() {
+            return Ok(default);
+        }
+        match value.as_str() {
+            "y" | "yes" | "true" => return Ok(true),
+            "n" | "no" | "false" => return Ok(false),
+            _ => {
+                println!("Please answer with y/n.");
+            }
+        }
     }
 }
 
@@ -193,7 +398,7 @@ fn upload(
     host: &str,
     file_path: &str,
     token: &str,
-    upload_path: &str,
+    upload_path: Option<&str>,
     allow_no_ext: bool,
 ) -> Result<()> {
     let client = build_client()?;
@@ -223,8 +428,8 @@ fn upload(
         multipart::Part::reader_with_length(reader, file_size).file_name(file_name),
     );
 
-    if !upload_path.is_empty() {
-        form = form.text("path", upload_path.to_string());
+    if let Some(path) = upload_path {
+        form = form.text("path", path.to_string());
     }
 
     let mut request = client
@@ -233,8 +438,8 @@ fn upload(
         .header("X-Upload-Token", token)
         .multipart(form);
 
-    if !upload_path.is_empty() {
-        request = request.header("X-Upload-Path", upload_path);
+    if let Some(path) = upload_path {
+        request = request.header("X-Upload-Path", path);
     }
     if allow_no_ext {
         request = request.header("X-Allow-No-Ext", "true");
