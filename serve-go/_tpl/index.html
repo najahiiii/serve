@@ -25,7 +25,7 @@
             border-collapse: collapse;
         }
         th, td {
-            padding: 4px 12px;
+            padding-right: 15px
         }
         th:hover, td:hover {
             text-decoration: underline;
@@ -73,7 +73,11 @@
         </tr>
         {{if .ParentURL}}
         <tr>
-            <td colspan="5"><a href="{{.ParentURL}}">..</a></td>
+            <td class="index"></td>
+            <td class="file-name"><a href="{{.ParentURL}}">..</a></td>
+            <td class="file-size"></td>
+            <td class="mime"></td>
+            <td class="date"></td>
         </tr>
         {{end}}
         {{range .Items}}

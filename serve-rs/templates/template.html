@@ -1,78 +1,86 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="color-scheme" content="light dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
     <title>Directory Listing of {{ directory }}</title>
-    <meta name="description" content="Browse files and folders located at {{ directory }}.">
-    <meta name="robots" content="index, follow">
-
+    <meta
+      name="description"
+      content="Browse files and folders located at {{ directory }}." />
+    <meta name="robots" content="index, follow" />
     <style>
-        body {
-            font-family: "Lucida Console", "Courier New", monospace;
-            -webkit-user-select: none;
-            -ms-user-select: none;
-            user-select: none
-        }
-        h1 {
-            font-family: "Times New Roman", Times, serif;
-            border-bottom: 1px solid silver;
-            margin-bottom: 10px;
-            padding-bottom: 10px;
-            white-space: nowrap
-        }
-        th, td {
-            padding-right: 15px
-        }
-        th:hover, td:hover {
-            text-decoration: underline
-        }
-        .index {
-            text-align: right
-        }
-        .file-name {
-            text-align: left
-        }
-        .file-size {
-            text-align: center
-        }
-        .mime {
-            text-align: center
-        }
-        .date {
-            text-align: right
-        }
-        p, a, li {
-            color: #e0e0e0
-        }
-        a {
-            color: #1e90ff
-        }
-        a:hover {
-            text-decoration: unset
-        }
-        footer{
-            font-family: "Lucida Console", "Courier New", monospace;
-            border-top: 1px solid silver;
-            margin-top: 10px;
-            padding-top: 10px;
-            white-space: nowrap
-        }
+      body {
+        font-family: "Lucida Console", "Courier New", monospace;
+        -webkit-user-select: none;
+        -ms-user-select: none;
+        user-select: none;
+      }
+      h1 {
+        font-family: "Times New Roman", Times, serif;
+        border-bottom: 1px solid silver;
+        margin-bottom: 10px;
+        padding-bottom: 10px;
+        white-space: nowrap;
+      }
+      table {
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        padding-right: 15px;
+      }
+      th:hover,
+      td:hover {
+        text-decoration: underline;
+      }
+      .index {
+        text-align: right;
+      }
+      .file-name {
+        text-align: left;
+      }
+      .file-size {
+        text-align: center;
+      }
+      .mime {
+        text-align: center;
+      }
+      .date {
+        text-align: right;
+      }
+      p,
+      a,
+      li {
+        color: #e0e0e0;
+      }
+      a {
+        color: #1e90ff;
+      }
+      a:hover {
+        text-decoration: unset;
+      }
+      footer {
+        font-family: "Lucida Console", "Courier New", monospace;
+        border-top: 1px solid silver;
+        margin-top: 10px;
+        padding-top: 10px;
+        white-space: nowrap;
+      }
     </style>
-</head>
-<body>
+  </head>
+  <body>
     <h1>Index of {{ directory }}</h1>
     <table>
-        <tr>
-            <th class="index">#</th>
-            <th class="file-name">Name</th>
-            <th class="file-size">Size</th>
-            <th class="mime">MIME</th>
-            <th class="date">Last Modified</th>
-        </tr>
-        {{ rows }}
+      <tr>
+        <th class="index">#</th>
+        <th class="file-name">Name</th>
+        <th class="file-size">Size</th>
+        <th class="mime">MIME</th>
+        <th class="date">Last Modified</th>
+      </tr>
+      {{ rows }}
     </table>
     <footer>&copy; {{ year }} <i>{{ host }}</i>.</footer>
-</body>
+  </body>
 </html>

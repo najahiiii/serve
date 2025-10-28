@@ -265,6 +265,8 @@ func listDir(w http.ResponseWriter, r *http.Request, absPath, rel string) {
 			mimeType = mime.TypeByExtension(strings.ToLower(filepath.Ext(name)))
 			if mimeType == "" {
 				mimeType = "application/octet-stream"
+			} else if idx := strings.Index(mimeType, ";"); idx != -1 {
+				mimeType = strings.TrimSpace(mimeType[:idx])
 			}
 		}
 		modHuman := e.ModTime().Local().Format("2006-01-02 15:04:05")

@@ -77,6 +77,25 @@ Ensure user/group `serve` exists or adjust `User=`/`Group=` in unit files.
 
 An OpenResty/Nginx v1.25+ server block example is available at `deploy/reverse-proxy/serve`. It demonstrates HTTP/2 + QUIC (HTTP/3) listeners, TLS, real-IP headers, and `proxy_set_header` values compatible with both backends. Adjust `server_name`, certificate paths, and upstream target before production use.
 
+## CLI helper
+
+`serve-cli/` provides a Rust-based helper tool:
+
+```bash
+cargo build --manifest-path serve-cli/Cargo.toml --release
+./serve-cli/target/release/serve-cli list --host https://files.example.com --path dir/
+./serve-cli/target/release/serve-cli upload --host https://files.example.com \
+    --file ./archive.tar --token Inipassword_ --upload-path backups/
+./serve-cli/target/release/serve-cli download --host https://files.example.com \
+    --path dir/archive.tar --out archive.tar
+./serve-cli/target/release/serve-cli download --host https://files.example.com \
+    --path dir/ --recursive --out backups
+```
+
+Install via `make build` / `make install` to populate `dist/serve-cli` and `/usr/local/bin/serve-cli`.
+
+Both servers emit JSON directory listings when clients send the header `X-Serve-Client: serve-cli` (used by the helper); browsers still receive the HTML view by default.
+
 ## Upload API
 
 ```bash

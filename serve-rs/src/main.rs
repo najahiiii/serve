@@ -427,10 +427,14 @@ async fn render_directory(
         rows.push_str(&format!(
             r#"
                 <tr>
-                    <td colspan="5"><a href="{}">..</a></td>
+                    <td class="index"></td>
+                    <td class="file-name"><a href="{link}">..</a></td>
+                    <td class="file-size"></td>
+                    <td class="mime"></td>
+                    <td class="date"></td>
                 </tr>
             "#,
-            encode_link(&parent_link)
+            link = encode_link(&parent_link)
         ));
     }
 
