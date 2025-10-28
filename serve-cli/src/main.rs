@@ -771,6 +771,15 @@ fn fetch_listing_optional(
     match response {
         Ok(resp) => {
             if resp.status().is_success() {
+                let is_json = resp
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .map(|content_type| content_type.contains("application/json"))
+                    .unwrap_or(false);
+                if !is_json {
+                    return Ok(None);
+                }
                 match resp.json::<ListResponse>() {
                     Ok(data) => Ok(Some(data)),
                     Err(_) => Ok(None),
