@@ -32,7 +32,7 @@ release: compress
 	@rm -f serve-$(VERSION)_rel.tar
 	tar -C $(DIST_DIR) --transform='s,^,serve-$(VERSION)/,' -cf serve-$(VERSION)_rel.tar .
 
-install: build
+install: compress
 	install -m 755 $(DIST_DIR)/$(SERVER_BIN) $(BIN_DIR)/$(SERVER_BIN)
 	install -m 755 $(DIST_DIR)/$(CLI_BIN) $(BIN_DIR)/$(CLI_BIN)
 
