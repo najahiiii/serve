@@ -7,9 +7,11 @@ use reqwest::Url;
 use reqwest::blocking::{Client, Response, multipart};
 use reqwest::header::{ACCEPT, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, Once, OnceLock};
 use tabled::{Table, Tabled, settings::Style};
 
 const DEFAULT_HOST: &str = "http://127.0.0.1:3435";
@@ -19,7 +21,7 @@ const CLIENT_HEADER_VALUE: &str = "serve-cli";
 #[command(
     name = "serve-cli",
     version,
-    about = "CLI helper for serve-go & serve-rs file servers"
+    about = "CLI helper for the serve file server"
 )]
 struct Cli {
     /// Path to custom configuration file
@@ -129,6 +131,69 @@ struct TableEntry {
 
 const CONFIG_FILE_NAME: &str = "serve-cli.toml";
 
+static SIGNAL_HANDLER: Once = Once::new();
+static TEMP_FILE_REGISTRY: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+struct TempCleanupGuard {
+    active: bool,
+}
+
+impl TempCleanupGuard {
+    fn new() -> Self {
+        Self { active: true }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for TempCleanupGuard {
+    fn drop(&mut self) {
+        if self.active {
+            cleanup_temp_files();
+        }
+    }
+}
+
+fn install_signal_handler() {
+    SIGNAL_HANDLER.call_once(|| {
+        if let Err(err) = ctrlc::set_handler(|| {
+            cleanup_temp_files();
+            eprintln!("Operation cancelled; temporary files removed.");
+            std::process::exit(130);
+        }) {
+            eprintln!("failed to install Ctrl+C handler: {err}");
+        }
+    });
+}
+
+fn temp_registry() -> &'static Mutex<HashSet<PathBuf>> {
+    TEMP_FILE_REGISTRY.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn track_temp_file(path: &Path) {
+    if let Ok(mut registry) = temp_registry().lock() {
+        registry.insert(path.to_path_buf());
+    }
+}
+
+fn untrack_temp_file(path: &Path) {
+    if let Ok(mut registry) = temp_registry().lock() {
+        registry.remove(path);
+    }
+}
+
+fn cleanup_temp_files() {
+    let mut to_remove = Vec::new();
+    if let Ok(mut registry) = temp_registry().lock() {
+        to_remove.extend(registry.drain());
+    }
+    for path in to_remove {
+        let _ = fs::remove_file(&path);
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct AppConfig {
     host: Option<String>,
@@ -145,6 +210,8 @@ struct LoadedConfig {
 }
 
 fn main() -> Result<()> {
+    install_signal_handler();
+
     let Cli { config, command } = Cli::parse();
     let loaded_config = load_config(config.as_deref())?;
     let app_config = loaded_config.data.clone();
@@ -824,6 +891,11 @@ fn download_file(
         }
     }
 
+    if connections > 1 {
+        eprintln!("multi-connection downloads are no longer supported; using a single connection");
+    }
+
+    let mut cleanup_guard = TempCleanupGuard::new();
     let url = normalize_url(host, remote)?;
     let probe = probe_file(client, &url)?;
 
@@ -833,93 +905,32 @@ fn download_file(
         .map(|s| s.to_string())
         .unwrap_or_else(|| output.to_string_lossy().into_owned());
 
-    if let Some(total) = probe.length {
-        let mut part_count = usize::from(connections.max(1).min(16));
-        if part_count == 0 {
-            part_count = 1;
-        }
-        if !probe.accept_ranges || total == 0 {
-            part_count = 1;
-        }
-
-        if total == 0 {
-            let progress = create_progress_bar(Some(0), &label_owned);
-            progress.finish_with_message("Download complete");
-            finalize_empty_file(output)?;
-            println!("Downloaded 0 bytes from {}", remote);
-            return Ok(());
-        }
-
-        let mut part_infos = build_part_plan(output, total, part_count)?;
-        let mut completed = 0u64;
-        for info in &part_infos {
-            completed = completed.saturating_add(info.existing_bytes);
-        }
-
-        let progress = create_progress_bar(Some(total), &label_owned);
-        progress.set_position(completed.min(total));
-
-        for info in &mut part_infos {
-            let part_total = info.len();
-            if info.existing_bytes >= part_total {
-                continue;
-            }
-
-            let range_start = info.start + info.existing_bytes;
-            let range_end = info.end;
-
-            let mut request = client
-                .get(url.clone())
-                .header("X-Serve-Client", CLIENT_HEADER_VALUE);
-
-            if range_start > 0 || range_end + 1 != total {
-                request = request.header(RANGE, format!("bytes={}-{}", range_start, range_end));
-            }
-
-            let mut response = request
-                .send()
-                .with_context(|| format!("request failed for {}", url))?
-                .error_for_status()
-                .with_context(|| format!("server returned error for {}", url))?;
-
-            if (range_start > 0 || range_end + 1 != total)
-                && response.status() != StatusCode::PARTIAL_CONTENT
-            {
-                anyhow::bail!("server did not honor range request");
-            }
-
-            let mut file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .open(&info.path)
-                .with_context(|| format!("failed to open temp file {}", info.path.display()))?;
-            file.seek(SeekFrom::Start(info.existing_bytes))
-                .with_context(|| format!("failed to seek temp file {}", info.path.display()))?;
-            let mut writer = BufWriter::new(file);
-
-            let expected = part_total - info.existing_bytes;
-            let bytes_written = stream_to_writer(&mut response, &mut writer, &progress)?;
-            if bytes_written != expected {
-                anyhow::bail!(
-                    "download interrupted for part {} (expected {} bytes, got {})",
-                    info.index,
-                    expected,
-                    bytes_written
-                );
-            }
-            info.existing_bytes = part_total;
-        }
-
+    if matches!(probe.length, Some(0)) {
+        let progress = create_progress_bar(Some(0), &label_owned);
         progress.finish_with_message("Download complete");
-        finalize_parts(output, total, &part_infos)?;
-        println!("Downloaded {} bytes from {}", total, remote);
-        Ok(())
-    } else {
-        download_without_length(client, &url, output, &label_owned, probe.accept_ranges)
-            .with_context(|| "streaming download failed")?;
-        println!("Downloaded file from {}", remote);
-        Ok(())
+        finalize_empty_file(output)?;
+        println!("Downloaded 0 bytes from {}", remote);
+        cleanup_guard.disarm();
+        return Ok(());
     }
+
+    download_to_single_file(
+        client,
+        &url,
+        output,
+        &label_owned,
+        probe.length,
+        probe.accept_ranges,
+    )
+    .with_context(|| "streaming download failed")?;
+    cleanup_guard.disarm();
+
+    if let Some(total) = probe.length {
+        println!("Downloaded {} bytes from {}", total, remote);
+    } else {
+        println!("Downloaded file from {}", remote);
+    }
+    Ok(())
 }
 
 struct FileProbe {
@@ -994,158 +1005,72 @@ fn probe_file(client: &Client, url: &Url) -> Result<FileProbe> {
     })
 }
 
-struct PartInfo {
-    index: usize,
-    start: u64,
-    end: u64,
-    path: PathBuf,
-    existing_bytes: u64,
-}
-
-impl PartInfo {
-    fn len(&self) -> u64 {
-        self.end.saturating_sub(self.start) + 1
-    }
-}
-
-fn build_part_plan(output: &Path, total: u64, requested_parts: usize) -> Result<Vec<PartInfo>> {
-    let parent = output.parent().unwrap_or(Path::new("."));
-    let file_name = output
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| anyhow::anyhow!("output path lacks valid filename"))?;
-    let prefix = format!(".{}", file_name);
-
-    let mut parts = Vec::new();
-    let chunk_size = (total + requested_parts as u64 - 1) / requested_parts as u64;
-
-    for index in 0..requested_parts {
-        let start = index as u64 * chunk_size;
-        if start >= total {
-            break;
-        }
-        let end = (start + chunk_size - 1).min(total.saturating_sub(1));
-        let path = parent.join(format!("{}.part{:02}.tmp", prefix, index));
-        let mut existing_bytes = if path.exists() {
-            fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0)
-        } else {
-            0
-        };
-        let part_len = end - start + 1;
-        if existing_bytes > part_len {
-            if let Ok(file) = OpenOptions::new().write(true).open(&path) {
-                let _ = file.set_len(part_len);
-            }
-            existing_bytes = part_len;
-        }
-        existing_bytes = existing_bytes.min(part_len);
-        parts.push(PartInfo {
-            index,
-            start,
-            end,
-            path,
-            existing_bytes,
-        });
-    }
-
-    if parts.is_empty() {
-        let end = total.saturating_sub(1);
-        parts.push(PartInfo {
-            index: 0,
-            start: 0,
-            end,
-            path: parent.join(format!("{}.part00.tmp", prefix)),
-            existing_bytes: 0,
-        });
-    }
-
-    Ok(parts)
-}
-
-fn finalize_parts(output: &Path, total: u64, parts: &[PartInfo]) -> Result<()> {
-    let parent = output.parent().unwrap_or(Path::new("."));
-    let file_name = output
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| anyhow::anyhow!("output path lacks valid filename"))?;
-    let temp_path = parent.join(format!(".{}.tmp", file_name));
-
-    let mut final_file = File::create(&temp_path)
-        .with_context(|| format!("failed to create temp file {}", temp_path.display()))?;
-    for part in parts {
-        let mut reader = BufReader::new(
-            File::open(&part.path)
-                .with_context(|| format!("failed to open part {}", part.path.display()))?,
-        );
-        io::copy(&mut reader, &mut final_file)
-            .with_context(|| format!("failed to merge part {}", part.path.display()))?;
-    }
-    final_file.flush()?;
-    drop(final_file);
-
-    if output.exists() {
-        fs::remove_file(output)
-            .with_context(|| format!("failed to remove existing file {}", output.display()))?;
-    }
-
-    fs::rename(&temp_path, output).with_context(|| {
-        format!(
-            "failed to move temp file into place for {}",
-            output.display()
-        )
-    })?;
-
-    for part in parts {
-        let _ = fs::remove_file(&part.path);
-    }
-
-    let meta = fs::metadata(output)
-        .with_context(|| format!("failed to stat downloaded file {}", output.display()))?;
-    if meta.len() != total {
-        anyhow::bail!(
-            "merged file size mismatch (expected {} bytes, found {})",
-            total,
-            meta.len()
-        );
-    }
-
-    Ok(())
-}
-
-fn finalize_empty_file(output: &Path) -> Result<()> {
+fn download_temp_path(output: &Path) -> Result<PathBuf> {
     let parent = output.parent().unwrap_or(Path::new("."));
     let file_name = output
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow!("output path lacks valid filename"))?;
-    let temp_path = parent.join(format!(".{}.tmp", file_name));
+    Ok(parent.join(format!(".{}.part00.tmp", file_name)))
+}
+
+fn finalize_empty_file(output: &Path) -> Result<()> {
+    let temp_path = download_temp_path(output)?;
+    track_temp_file(temp_path.as_path());
     File::create(&temp_path)?;
     if output.exists() {
         fs::remove_file(output).ok();
     }
     fs::rename(&temp_path, output)?;
+    untrack_temp_file(temp_path.as_path());
     Ok(())
 }
 
-fn download_without_length(
+fn download_to_single_file(
     client: &Client,
     url: &Url,
     output: &Path,
     label: &str,
+    total: Option<u64>,
     accept_ranges: bool,
-) -> Result<()> {
-    let parent = output.parent().unwrap_or(Path::new("."));
-    let file_name = output
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| anyhow::anyhow!("output path lacks valid filename"))?;
-    let temp_path = parent.join(format!(".{}.part00.tmp", file_name));
+) -> Result<u64> {
+    let temp_path = download_temp_path(output)?;
+    track_temp_file(temp_path.as_path());
 
     let mut existing = if temp_path.exists() {
         fs::metadata(&temp_path).map(|meta| meta.len()).unwrap_or(0)
     } else {
         0
     };
+
+    if let Some(total) = total {
+        if existing >= total && total > 0 {
+            if output.exists() {
+                fs::remove_file(output).with_context(|| {
+                    format!("failed to remove existing file {}", output.display())
+                })?;
+            }
+            fs::rename(&temp_path, output).with_context(|| {
+                format!(
+                    "failed to move temp file into place for {}",
+                    output.display()
+                )
+            })?;
+            untrack_temp_file(temp_path.as_path());
+            return Ok(total);
+        } else if existing > total {
+            // Truncate to expected size to avoid inconsistencies.
+            if let Ok(file) = OpenOptions::new().write(true).open(&temp_path) {
+                let _ = file.set_len(total);
+            }
+            existing = total;
+        }
+    }
+
+    if existing > 0 && !accept_ranges {
+        existing = 0;
+        let _ = fs::remove_file(&temp_path);
+    }
 
     let mut request = client
         .get(url.clone())
@@ -1157,24 +1082,25 @@ fn download_without_length(
     let mut response = request.send()?.error_for_status()?;
 
     if accept_ranges && existing > 0 && response.status() != StatusCode::PARTIAL_CONTENT {
-        // Server refused the range; restart download.
         existing = 0;
         let _ = fs::remove_file(&temp_path);
         response = client
             .get(url.clone())
             .header("X-Serve-Client", CLIENT_HEADER_VALUE)
-            .send()?;
-        response = response.error_for_status()?;
+            .send()?
+            .error_for_status()?;
     }
 
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
-        .open(&temp_path)?;
-    file.seek(SeekFrom::Start(existing))?;
+        .open(&temp_path)
+        .with_context(|| format!("failed to open temp file {}", temp_path.display()))?;
+    file.seek(SeekFrom::Start(existing))
+        .with_context(|| format!("failed to seek temp file {}", temp_path.display()))?;
     let mut writer = BufWriter::new(file);
 
-    let progress = create_progress_bar(None, label);
+    let progress = create_progress_bar(total, label);
     if existing > 0 {
         progress.inc(existing);
     }
@@ -1183,10 +1109,29 @@ fn download_without_length(
 
     drop(writer);
     if output.exists() {
-        fs::remove_file(output).ok();
+        fs::remove_file(output)
+            .with_context(|| format!("failed to remove existing file {}", output.display()))?;
     }
-    fs::rename(&temp_path, output)?;
-    Ok(())
+    fs::rename(&temp_path, output).with_context(|| {
+        format!(
+            "failed to move temp file into place for {}",
+            output.display()
+        )
+    })?;
+    untrack_temp_file(temp_path.as_path());
+    let final_meta = fs::metadata(output)
+        .with_context(|| format!("failed to stat downloaded file {}", output.display()))?;
+    if let Some(total) = total {
+        if final_meta.len() != total {
+            anyhow::bail!(
+                "downloaded file size mismatch (expected {} bytes, found {})",
+                total,
+                final_meta.len()
+            );
+        }
+    }
+
+    Ok(final_meta.len())
 }
 
 fn download_directory_recursive(

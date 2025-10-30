@@ -1,4 +1,4 @@
-# Example configuration for serve-go.
+# Example configuration for serve.
 
 # Optional: override the listening port (defaults to 3435).
 port = 3435
