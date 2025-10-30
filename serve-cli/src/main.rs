@@ -832,48 +832,67 @@ fn fetch_listing_optional(
     host: &str,
     remote: &str,
 ) -> Result<Option<ListResponse>> {
-    let listing_path = ensure_trailing_slash(remote);
-    let url = normalize_url(host, &listing_path)?;
+    fn try_fetch(client: &Client, host: &str, path: &str) -> Result<Option<ListResponse>> {
+        let url = normalize_url(host, path)?;
+        let response = client
+            .get(url.clone())
+            .header("X-Serve-Client", CLIENT_HEADER_VALUE)
+            .header(ACCEPT, "application/json")
+            .send();
 
-    let response = client
-        .get(url.clone())
-        .header("X-Serve-Client", CLIENT_HEADER_VALUE)
-        .header(ACCEPT, "application/json")
-        .send();
-
-    match response {
-        Ok(resp) => {
-            if resp.status().is_success() {
-                let is_json = resp
-                    .headers()
-                    .get(reqwest::header::CONTENT_TYPE)
-                    .and_then(|value| value.to_str().ok())
-                    .map(|content_type| content_type.contains("application/json"))
-                    .unwrap_or(false);
-                if !is_json {
-                    return Ok(None);
+        match response {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    let is_json = resp
+                        .headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok())
+                        .map(|content_type| content_type.contains("application/json"))
+                        .unwrap_or(false);
+                    if !is_json {
+                        return Ok(None);
+                    }
+                    match resp.json::<ListResponse>() {
+                        Ok(data) => Ok(Some(data)),
+                        Err(_) => Ok(None),
+                    }
+                } else if resp.status() == StatusCode::NOT_FOUND {
+                    Ok(None)
+                } else {
+                    Err(anyhow::anyhow!(
+                        "listing request failed with status {}",
+                        resp.status()
+                    ))
                 }
-                match resp.json::<ListResponse>() {
-                    Ok(data) => Ok(Some(data)),
-                    Err(_) => Ok(None),
-                }
-            } else if resp.status() == StatusCode::NOT_FOUND {
-                Ok(None)
-            } else {
-                Err(anyhow::anyhow!(
-                    "listing request failed with status {}",
-                    resp.status()
-                ))
             }
-        }
-        Err(err) => {
-            if err.status() == Some(StatusCode::NOT_FOUND) {
-                Ok(None)
-            } else {
-                Err(err).context("directory listing request failed")
+            Err(err) => {
+                if err.status() == Some(StatusCode::NOT_FOUND) {
+                    Ok(None)
+                } else {
+                    Err(err).context("directory listing request failed")
+                }
             }
         }
     }
+
+    let mut attempts = Vec::new();
+    attempts.push(remote.to_string());
+    if !remote.ends_with('/') && remote != "/" {
+        let alt = ensure_trailing_slash(remote);
+        if alt != remote {
+            attempts.push(alt);
+        }
+    }
+
+    for path in attempts {
+        match try_fetch(client, host, &path) {
+            Ok(Some(listing)) => return Ok(Some(listing)),
+            Ok(None) => continue,
+            Err(err) => return Err(err),
+        }
+    }
+
+    Ok(None)
 }
 
 fn download_file(
