@@ -891,10 +891,6 @@ fn download_file(
         }
     }
 
-    if connections > 1 {
-        eprintln!("multi-connection downloads are no longer supported; using a single connection");
-    }
-
     let mut cleanup_guard = TempCleanupGuard::new();
     let url = normalize_url(host, remote)?;
     let probe = probe_file(client, &url)?;
@@ -914,13 +910,22 @@ fn download_file(
         return Ok(());
     }
 
-    download_to_single_file(
+    let requested_connections = connections.max(1);
+    let effective_connections = requested_connections.min(16);
+    let multi_supported =
+        probe.length.is_some() && probe.accept_ranges && effective_connections > 1;
+    if requested_connections > 1 && !multi_supported {
+        eprintln!("server does not support multi-connection downloads; using a single connection");
+    }
+
+    let downloaded_len = download_to_single_file(
         client,
         &url,
         output,
         &label_owned,
         probe.length,
         probe.accept_ranges,
+        effective_connections,
     )
     .with_context(|| "streaming download failed")?;
     cleanup_guard.disarm();
@@ -928,7 +933,7 @@ fn download_file(
     if let Some(total) = probe.length {
         println!("Downloaded {} bytes from {}", total, remote);
     } else {
-        println!("Downloaded file from {}", remote);
+        println!("Downloaded {} bytes from {}", downloaded_len, remote);
     }
     Ok(())
 }
@@ -1014,6 +1019,126 @@ fn download_temp_path(output: &Path) -> Result<PathBuf> {
     Ok(parent.join(format!(".{}.part00.tmp", file_name)))
 }
 
+struct RangePart {
+    index: usize,
+    start: u64,
+    end: u64,
+}
+
+fn build_range_plan(total: u64, requested_parts: usize) -> Vec<RangePart> {
+    let mut parts = Vec::new();
+    if requested_parts == 0 {
+        return parts;
+    }
+    let chunk_size = (total + requested_parts as u64 - 1) / requested_parts as u64;
+    for index in 0..requested_parts {
+        let start = index as u64 * chunk_size;
+        if start >= total {
+            break;
+        }
+        let end = (start + chunk_size - 1).min(total.saturating_sub(1));
+        parts.push(RangePart { index, start, end });
+    }
+    parts
+}
+
+fn download_with_multiple_connections(
+    client: &Client,
+    url: &Url,
+    temp_path: &Path,
+    total: u64,
+    part_count: usize,
+    progress: &ProgressBar,
+) -> Result<()> {
+    let parts = build_range_plan(total, part_count);
+    if parts.is_empty() {
+        return Ok(());
+    }
+
+    let temp_path = temp_path.to_path_buf();
+    let url = url.clone();
+    let progress = progress.clone();
+
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(parts.len());
+
+        for part in parts {
+            let client_ref = client.clone();
+            let url = url.clone();
+            let temp_path = temp_path.clone();
+            let progress = progress.clone();
+
+            handles.push(scope.spawn(move || -> Result<()> {
+                let RangePart { index, start, end } = part;
+                let request = client_ref
+                    .get(url.clone())
+                    .header("X-Serve-Client", CLIENT_HEADER_VALUE)
+                    .header(RANGE, format!("bytes={}-{}", start, end));
+
+                let mut response = request
+                    .send()
+                    .with_context(|| format!("request failed for part {}", index))?
+                    .error_for_status()
+                    .with_context(|| format!("server returned error for part {}", index))?;
+
+                if response.status() != StatusCode::PARTIAL_CONTENT {
+                    return Err(anyhow!(
+                        "server did not honor range request for part {}",
+                        index
+                    ));
+                }
+
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .open(&temp_path)
+                    .with_context(|| format!("failed to open temp file {}", temp_path.display()))?;
+                file.seek(SeekFrom::Start(start))
+                    .with_context(|| format!("failed to seek temp file {}", temp_path.display()))?;
+                let mut writer = BufWriter::new(file);
+
+                let mut remaining = end.saturating_sub(start).saturating_add(1);
+                let mut buffer = vec![0u8; 16 * 1024];
+                while remaining > 0 {
+                    let to_read = remaining.min(buffer.len() as u64) as usize;
+                    let read = response
+                        .read(&mut buffer[..to_read])
+                        .with_context(|| format!("failed reading response for part {}", index))?;
+                    if read == 0 {
+                        return Err(anyhow!(
+                            "download interrupted for part {} ({} bytes remaining)",
+                            index,
+                            remaining
+                        ));
+                    }
+                    writer
+                        .write_all(&buffer[..read])
+                        .with_context(|| format!("failed writing part {} to temp file", index))?;
+                    remaining -= read as u64;
+                    progress.inc(read as u64);
+                }
+                writer.flush()?;
+                Ok(())
+            }));
+        }
+
+        for handle in handles {
+            match handle.join() {
+                Ok(result) => result?,
+                Err(panic) => {
+                    if let Ok(message) = panic.downcast::<String>() {
+                        return Err(anyhow!("download worker panicked: {}", *message));
+                    } else {
+                        return Err(anyhow!("download worker panicked"));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    })
+}
+
 fn finalize_empty_file(output: &Path) -> Result<()> {
     let temp_path = download_temp_path(output)?;
     track_temp_file(temp_path.as_path());
@@ -1033,6 +1158,7 @@ fn download_to_single_file(
     label: &str,
     total: Option<u64>,
     accept_ranges: bool,
+    connections: u8,
 ) -> Result<u64> {
     let temp_path = download_temp_path(output)?;
     track_temp_file(temp_path.as_path());
@@ -1045,19 +1171,7 @@ fn download_to_single_file(
 
     if let Some(total) = total {
         if existing >= total && total > 0 {
-            if output.exists() {
-                fs::remove_file(output).with_context(|| {
-                    format!("failed to remove existing file {}", output.display())
-                })?;
-            }
-            fs::rename(&temp_path, output).with_context(|| {
-                format!(
-                    "failed to move temp file into place for {}",
-                    output.display()
-                )
-            })?;
-            untrack_temp_file(temp_path.as_path());
-            return Ok(total);
+            return finalize_temp_file(&temp_path, output, Some(total));
         } else if existing > total {
             // Truncate to expected size to avoid inconsistencies.
             if let Ok(file) = OpenOptions::new().write(true).open(&temp_path) {
@@ -1070,6 +1184,34 @@ fn download_to_single_file(
     if existing > 0 && !accept_ranges {
         existing = 0;
         let _ = fs::remove_file(&temp_path);
+    }
+
+    let part_count = connections.max(1) as usize;
+
+    if let Some(total) = total {
+        if accept_ranges && part_count > 1 {
+            if existing > 0 {
+                eprintln!("existing partial download found; restarting multi-connection download");
+                let _ = fs::remove_file(&temp_path);
+            }
+
+            let temp_file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(&temp_path)
+                .with_context(|| format!("failed to open temp file {}", temp_path.display()))?;
+            temp_file
+                .set_len(total)
+                .with_context(|| format!("failed to resize temp file {}", temp_path.display()))?;
+            drop(temp_file);
+
+            let progress = create_progress_bar(Some(total), label);
+            download_with_multiple_connections(
+                client, url, &temp_path, total, part_count, &progress,
+            )?;
+            progress.finish_with_message("Download complete");
+            return finalize_temp_file(&temp_path, output, Some(total));
+        }
     }
 
     let mut request = client
@@ -1108,24 +1250,30 @@ fn download_to_single_file(
     progress.finish_with_message("Download complete");
 
     drop(writer);
+
+    finalize_temp_file(&temp_path, output, total)
+}
+
+fn finalize_temp_file(temp_path: &Path, output: &Path, total: Option<u64>) -> Result<u64> {
     if output.exists() {
         fs::remove_file(output)
             .with_context(|| format!("failed to remove existing file {}", output.display()))?;
     }
-    fs::rename(&temp_path, output).with_context(|| {
+    fs::rename(temp_path, output).with_context(|| {
         format!(
             "failed to move temp file into place for {}",
             output.display()
         )
     })?;
-    untrack_temp_file(temp_path.as_path());
+    untrack_temp_file(temp_path);
+
     let final_meta = fs::metadata(output)
         .with_context(|| format!("failed to stat downloaded file {}", output.display()))?;
-    if let Some(total) = total {
-        if final_meta.len() != total {
+    if let Some(expected) = total {
+        if final_meta.len() != expected {
             anyhow::bail!(
                 "downloaded file size mismatch (expected {} bytes, found {})",
-                total,
+                expected,
                 final_meta.len()
             );
         }
