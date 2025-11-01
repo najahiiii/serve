@@ -713,7 +713,7 @@ fn create_progress_bar(total: Option<u64>, label: &str) -> ProgressBar {
         pb.set_prefix(formatted);
         pb.set_style(
             ProgressStyle::with_template(
-                "{prefix} {bar:40.cyan/blue} {bytes}/{total_bytes} ({eta}) {bytes_per_sec}",
+                "{prefix} {bar:40.cyan/blue} {bytes}/{total_bytes} ({percent:>3}%) ({eta}) {bytes_per_sec}",
             )
             .unwrap()
             .progress_chars("##-"),
