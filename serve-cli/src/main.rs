@@ -78,7 +78,7 @@ enum Command {
     Config,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ListResponse {
     path: String,
     entries: Vec<ListEntry>,
@@ -86,7 +86,7 @@ struct ListResponse {
     powered_by: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ListEntry {
     name: String,
     size: String,
@@ -832,7 +832,14 @@ fn fetch_listing_optional(
     host: &str,
     remote: &str,
 ) -> Result<Option<ListResponse>> {
-    fn try_fetch(client: &Client, host: &str, path: &str) -> Result<Option<ListResponse>> {
+    #[derive(Debug)]
+    enum ListingProbe {
+        Listing(ListResponse),
+        NotFound,
+        NotDirectory,
+    }
+
+    fn try_fetch(client: &Client, host: &str, path: &str) -> Result<ListingProbe> {
         let url = normalize_url(host, path)?;
         let response = client
             .get(url.clone())
@@ -850,14 +857,14 @@ fn fetch_listing_optional(
                         .map(|content_type| content_type.contains("application/json"))
                         .unwrap_or(false);
                     if !is_json {
-                        return Ok(None);
+                        return Ok(ListingProbe::NotDirectory);
                     }
                     match resp.json::<ListResponse>() {
-                        Ok(data) => Ok(Some(data)),
-                        Err(_) => Ok(None),
+                        Ok(data) => Ok(ListingProbe::Listing(data)),
+                        Err(_) => Ok(ListingProbe::NotDirectory),
                     }
                 } else if resp.status() == StatusCode::NOT_FOUND {
-                    Ok(None)
+                    Ok(ListingProbe::NotFound)
                 } else {
                     Err(anyhow::anyhow!(
                         "listing request failed with status {}",
@@ -867,7 +874,7 @@ fn fetch_listing_optional(
             }
             Err(err) => {
                 if err.status() == Some(StatusCode::NOT_FOUND) {
-                    Ok(None)
+                    Ok(ListingProbe::NotFound)
                 } else {
                     Err(err).context("directory listing request failed")
                 }
@@ -875,24 +882,10 @@ fn fetch_listing_optional(
         }
     }
 
-    let mut attempts = Vec::new();
-    attempts.push(remote.to_string());
-    if !remote.ends_with('/') && remote != "/" {
-        let alt = ensure_trailing_slash(remote);
-        if alt != remote {
-            attempts.push(alt);
-        }
+    match try_fetch(client, host, remote)? {
+        ListingProbe::Listing(listing) => Ok(Some(listing)),
+        ListingProbe::NotDirectory | ListingProbe::NotFound => Ok(None),
     }
-
-    for path in attempts {
-        match try_fetch(client, host, &path) {
-            Ok(Some(listing)) => return Ok(Some(listing)),
-            Ok(None) => continue,
-            Err(err) => return Err(err),
-        }
-    }
-
-    Ok(None)
 }
 
 fn download_file(
