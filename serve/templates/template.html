@@ -81,6 +81,10 @@
       </tr>
       {{ rows }}
     </table>
-    <footer>&copy; {{ year }} <i>{{ host }}</i>.</footer>
+    <footer>
+      Disk used: {{ disk_usage }} | Total files: {{ total_files }} | &copy; {{
+      year }}
+      <i>{{ host }}</i>.
+    </footer>
   </body>
 </html>

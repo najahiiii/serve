@@ -518,7 +518,17 @@ async fn render_directory(
     let host = host_header(headers);
     let directory_label = directory_label(requested_path, &host);
     let current_year = Local::now().year();
-    let body = template::render_directory_page(&directory_label, &rows, current_year, &host);
+    let total_files = entries.len();
+    let total_bytes: u64 = entries.iter().map(|entry| entry.size_bytes).sum();
+    let disk_usage = format_size(total_bytes);
+    let body = template::render_directory_page(
+        &directory_label,
+        &rows,
+        current_year,
+        &host,
+        &disk_usage,
+        total_files,
+    );
 
     Ok(Response::builder()
         .status(StatusCode::OK)
