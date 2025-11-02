@@ -1883,7 +1883,7 @@ dependencies = [
 
 [[package]]
 name = "serve"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "axum",
  "chrono",
@@ -1905,7 +1905,7 @@ dependencies = [
 
 [[package]]
 name = "serve-cli"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "clap",
