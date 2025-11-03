@@ -2,10 +2,12 @@ use anyhow::{Context, Result};
 use reqwest::Url;
 use reqwest::blocking::{Client, Response};
 use serde::de::DeserializeOwned;
+use std::time::Duration;
 
 pub fn build_client() -> Result<Client> {
     Client::builder()
         .user_agent("serve-cli")
+        .timeout(Duration::from_secs(3600))
         .build()
         .context("failed to build HTTP client")
 }
