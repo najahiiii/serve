@@ -51,6 +51,8 @@ enum Command {
         upload_path: Option<String>,
         #[arg(long, default_value_t = false)]
         allow_no_ext: bool,
+        #[arg(long, default_value_t = false)]
+        stream: bool,
     },
     /// Download a file from the server
     Download {
@@ -93,6 +95,7 @@ fn main() -> Result<()> {
             token,
             upload_path,
             allow_no_ext,
+            stream,
         } => {
             let resolved_host = resolve_host(host, &app_config);
             let resolved_token = resolve_token(token, &app_config)?;
@@ -104,6 +107,7 @@ fn main() -> Result<()> {
                 &resolved_token,
                 resolved_path.as_deref(),
                 effective_allow,
+                stream,
             )
         }
         Command::Download {

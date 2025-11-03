@@ -20,3 +20,5 @@ tower-http = { version = "0.5", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 html-escape = "0.2"
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+http-body-util = { version = "0.1", default-features = false }
