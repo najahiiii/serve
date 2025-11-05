@@ -21,12 +21,26 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExistingFileStrategy {
+    Overwrite,
+    Skip,
+    Duplicate,
+}
+
+#[derive(Debug)]
+struct DownloadOutcome {
+    path: PathBuf,
+    skipped: bool,
+}
+
 pub fn download(
     host: &str,
     remote_path: &str,
     out_override: Option<String>,
     recursive: bool,
     connections: u8,
+    existing_strategy: ExistingFileStrategy,
 ) -> Result<()> {
     let trimmed = remote_path.trim();
     if trimmed.is_empty() {
@@ -44,10 +58,28 @@ pub fn download(
             );
         }
 
-        let base_local = match out_override {
+        let mut base_local = match out_override {
             Some(path) => Path::new(&path).to_path_buf(),
             None => derive_directory_name(&remote)?,
         };
+
+        match existing_strategy {
+            ExistingFileStrategy::Duplicate => {
+                if base_local.exists() {
+                    base_local = next_available_path(&base_local);
+                }
+            }
+            ExistingFileStrategy::Skip => {
+                if base_local.exists() {
+                    println!(
+                        "Skipping download; local directory {} already exists",
+                        base_local.display()
+                    );
+                    return Ok(());
+                }
+            }
+            ExistingFileStrategy::Overwrite => {}
+        }
 
         let remote_dir = ensure_trailing_slash(&remote);
         download_directory_recursive(
@@ -57,6 +89,7 @@ pub fn download(
             &base_local,
             listing,
             connections,
+            existing_strategy,
         )?;
         println!("Directory saved to {}", base_local.display());
         return Ok(());
@@ -67,8 +100,23 @@ pub fn download(
         None => derive_file_name(&remote),
     };
 
-    download_file(&client, host, &remote, &output_path, connections)?;
-    println!("Saved to {}", output_path.display());
+    let outcome = download_file(
+        &client,
+        host,
+        &remote,
+        &output_path,
+        connections,
+        existing_strategy,
+    )?;
+
+    if outcome.skipped {
+        println!(
+            "Skipped download; keeping existing file at {}",
+            outcome.path.display()
+        );
+    } else {
+        println!("Saved to {}", outcome.path.display());
+    }
     Ok(())
 }
 
@@ -91,8 +139,55 @@ fn download_file(
     remote: &str,
     output: &Path,
     connections: u8,
-) -> Result<()> {
-    if let Some(parent) = output.parent() {
+    existing_strategy: ExistingFileStrategy,
+) -> Result<DownloadOutcome> {
+    let url = normalize_url(host, remote)?;
+    let probe = probe_file(client, &url)?;
+
+    let output_path = match existing_strategy {
+        ExistingFileStrategy::Duplicate => next_available_path(output),
+        _ => output.to_path_buf(),
+    };
+
+    if matches!(existing_strategy, ExistingFileStrategy::Skip) && output_path.exists() {
+        let message = match fs::metadata(&output_path) {
+            Ok(meta) => match probe.length {
+                Some(remote_len) => {
+                    if meta.len() == remote_len {
+                        format!(
+                            "Skipping download; {} already exists with matching size ({} bytes)",
+                            output_path.display(),
+                            remote_len
+                        )
+                    } else {
+                        format!(
+                            "Skipping download; {} exists ({} bytes) but remote reports {} bytes. Rerun without --skip to replace it.",
+                            output_path.display(),
+                            meta.len(),
+                            remote_len
+                        )
+                    }
+                }
+                None => format!(
+                    "Skipping download; {} already exists ({} bytes) and remote size is unknown",
+                    output_path.display(),
+                    meta.len()
+                ),
+            },
+            Err(err) => format!(
+                "Skipping download; {} already exists but metadata could not be read: {}",
+                output_path.display(),
+                err
+            ),
+        };
+        println!("{}", message);
+        return Ok(DownloadOutcome {
+            path: output_path,
+            skipped: true,
+        });
+    }
+
+    if let Some(parent) = output_path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).with_context(|| {
                 format!("failed to create parent directory {}", parent.display())
@@ -101,20 +196,21 @@ fn download_file(
     }
 
     let mut cleanup_guard = TempCleanupGuard::new();
-    let url = normalize_url(host, remote)?;
-    let probe = probe_file(client, &url)?;
 
-    let label_owned = output
+    let label_owned = output_path
         .file_name()
         .and_then(|s| s.to_str())
         .map(|s| s.to_string())
-        .unwrap_or_else(|| output.to_string_lossy().into_owned());
+        .unwrap_or_else(|| output_path.to_string_lossy().into_owned());
 
     if matches!(probe.length, Some(0)) {
-        finalize_empty_file(output)?;
+        finalize_empty_file(&output_path)?;
         println!("Downloaded 0 bytes from {}", remote);
         cleanup_guard.disarm();
-        return Ok(());
+        return Ok(DownloadOutcome {
+            path: output_path,
+            skipped: false,
+        });
     }
 
     let requested_connections = connections.max(1);
@@ -128,7 +224,7 @@ fn download_file(
     let downloaded_len = download_to_single_file(
         client,
         &url,
-        output,
+        &output_path,
         &label_owned,
         probe.length,
         probe.accept_ranges,
@@ -142,7 +238,10 @@ fn download_file(
     } else {
         println!("Downloaded {} bytes from {}", downloaded_len, remote);
     }
-    Ok(())
+    Ok(DownloadOutcome {
+        path: output_path,
+        skipped: false,
+    })
 }
 
 struct FileProbe {
@@ -657,6 +756,7 @@ fn download_directory_recursive(
     local_dir: &Path,
     listing: ListResponse,
     connections: u8,
+    existing_strategy: ExistingFileStrategy,
 ) -> Result<()> {
     fs::create_dir_all(local_dir)
         .with_context(|| format!("failed to create directory {}", local_dir.display()))?;
@@ -666,6 +766,20 @@ fn download_directory_recursive(
         let child_local = local_dir.join(&entry.name);
 
         if entry.is_dir {
+            let mut target_local = child_local;
+            if matches!(existing_strategy, ExistingFileStrategy::Duplicate) && target_local.exists()
+            {
+                target_local = next_available_path(&target_local);
+            }
+
+            if matches!(existing_strategy, ExistingFileStrategy::Skip) && target_local.exists() {
+                println!(
+                    "Skipping download of directory {}; already exists",
+                    target_local.display()
+                );
+                continue;
+            }
+
             child_remote = ensure_trailing_slash(&child_remote);
             let child_listing = fetch_listing_optional(client, host, &child_remote)?
                 .ok_or_else(|| anyhow::anyhow!("failed to list directory {}", child_remote))?;
@@ -673,12 +787,20 @@ fn download_directory_recursive(
                 client,
                 host,
                 &child_remote,
-                &child_local,
+                &target_local,
                 child_listing,
                 connections,
+                existing_strategy,
             )?;
         } else {
-            download_file(client, host, &child_remote, &child_local, connections)?;
+            download_file(
+                client,
+                host,
+                &child_remote,
+                &child_local,
+                connections,
+                existing_strategy,
+            )?;
         }
     }
 
@@ -779,6 +901,57 @@ fn derive_directory_name(remote: &str) -> Result<PathBuf> {
         Ok(PathBuf::from(name))
     } else {
         Ok(PathBuf::from("download"))
+    }
+}
+
+fn next_available_path(base: &Path) -> PathBuf {
+    if !base.exists() {
+        return base.to_path_buf();
+    }
+
+    let mut index = 1usize;
+    loop {
+        let candidate = path_with_suffix(base, index);
+        if !candidate.exists() {
+            return candidate;
+        }
+        index = index
+            .checked_add(1)
+            .expect("exhausted duplicate suffixes while searching for unique path");
+    }
+}
+
+fn path_with_suffix(base: &Path, index: usize) -> PathBuf {
+    let parent = base.parent().unwrap_or_else(|| Path::new(""));
+    let file_name = base
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "download".to_string());
+    let (stem, ext) = if file_name.is_empty() {
+        ("download".to_string(), None)
+    } else if let Some(pos) = file_name.rfind('.') {
+        let (stem, ext) = file_name.split_at(pos);
+        if stem.is_empty() {
+            (file_name, None)
+        } else if ext.len() > 1 {
+            (stem.to_string(), Some(ext[1..].to_string()))
+        } else {
+            (stem.to_string(), None)
+        }
+    } else {
+        (file_name, None)
+    };
+
+    let mut candidate = format!("{}-{}", stem, index);
+    if let Some(ext) = ext {
+        candidate.push('.');
+        candidate.push_str(&ext);
+    }
+
+    if parent.as_os_str().is_empty() {
+        PathBuf::from(candidate)
+    } else {
+        parent.join(candidate)
     }
 }
 

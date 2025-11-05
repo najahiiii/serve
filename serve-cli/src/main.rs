@@ -9,6 +9,7 @@ mod upload;
 
 use crate::config::{AppConfig, LoadedConfig};
 use crate::constants::DEFAULT_HOST;
+use crate::download::ExistingFileStrategy;
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
 use std::io::{self, Write};
@@ -70,6 +71,12 @@ enum Command {
         /// Number of parts to split the download into (requires range support)
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=16))]
         connections: u8,
+        /// Skip download if local file already exists
+        #[arg(long, default_value_t = false, conflicts_with = "dup")]
+        skip: bool,
+        /// Preserve existing files by writing duplicates with numeric suffix
+        #[arg(long, default_value_t = false, conflicts_with = "skip")]
+        dup: bool,
     },
     /// Interactive configuration helper
     Setup,
@@ -116,14 +123,24 @@ fn main() -> Result<()> {
             out,
             recursive,
             connections,
+            skip,
+            dup,
         } => {
             let resolved_host = resolve_host(host, &app_config);
+            let existing_strategy = if skip {
+                ExistingFileStrategy::Skip
+            } else if dup {
+                ExistingFileStrategy::Duplicate
+            } else {
+                ExistingFileStrategy::Overwrite
+            };
             download::download(
                 &resolved_host,
                 &path,
                 out,
                 recursive,
                 connections.clamp(1, 16),
+                existing_strategy,
             )
         }
         Command::Setup => run_setup(config.as_deref(), &app_config),
