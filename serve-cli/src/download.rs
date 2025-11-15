@@ -14,6 +14,7 @@ use reqwest::header::{ACCEPT, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, RANG
 use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json;
+use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -34,6 +35,8 @@ struct DownloadOutcome {
     path: PathBuf,
     skipped: bool,
 }
+
+const MAX_CHUNK_SIZE: u64 = 256 * 1024 * 1024;
 
 pub fn download(
     host: &str,
@@ -357,6 +360,14 @@ struct RangePart {
     end: u64,
 }
 
+fn chunk_count_for_total(total: u64) -> usize {
+    if total == 0 {
+        return 1;
+    }
+    let chunk_size = MAX_CHUNK_SIZE.max(1);
+    ((total + chunk_size - 1) / chunk_size) as usize
+}
+
 fn build_range_plan(total: u64, requested_parts: usize) -> Vec<RangePart> {
     let mut parts = Vec::new();
     if requested_parts == 0 {
@@ -381,14 +392,14 @@ fn download_with_multiple_connections(
     total: u64,
     progress: &ProgressBar,
     mut state: PartialDownloadState,
+    connection_limit: usize,
     max_retries: usize,
 ) -> Result<PartialDownloadState> {
     state.total = Some(total);
     state.part_count = state.part_count.max(1);
     state.ensure_layout(total);
-    let total_connections = state.part_count;
     let active_connections = Arc::new(AtomicUsize::new(0));
-    progress::update_connection_message(progress, 0, total_connections);
+    let connection_limit = connection_limit.max(1);
 
     let file = OpenOptions::new()
         .create(true)
@@ -405,21 +416,12 @@ fn download_with_multiple_connections(
         progress.inc(completed_bytes);
     }
 
-    #[derive(Clone)]
-    struct PartWork {
-        index: usize,
-        start: u64,
-        end: u64,
-    }
-
     let state = Arc::new(Mutex::new(state));
     let temp_path_buf = temp_path.to_path_buf();
     let url = url.clone();
     let progress = progress.clone();
-    let active_connections_for_threads = active_connections.clone();
-    let total_connections_for_threads = total_connections;
 
-    let work_items: Vec<PartWork> = {
+    let pending_indices: Vec<usize> = {
         let guard = state.lock().unwrap();
         guard
             .parts
@@ -428,20 +430,12 @@ fn download_with_multiple_connections(
             .filter_map(|(index, entry)| {
                 let len = entry.len();
                 let downloaded = entry.downloaded.min(len);
-                if downloaded >= len {
-                    None
-                } else {
-                    Some(PartWork {
-                        index,
-                        start: entry.start,
-                        end: entry.end,
-                    })
-                }
+                if downloaded >= len { None } else { Some(index) }
             })
             .collect()
     };
 
-    if work_items.is_empty() {
+    if pending_indices.is_empty() {
         let final_state = match Arc::try_unwrap(state) {
             Ok(mutex) => mutex
                 .into_inner()
@@ -451,127 +445,157 @@ fn download_with_multiple_connections(
         return Ok(final_state);
     }
 
-    std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(work_items.len());
+    let initial_queue = VecDeque::from(pending_indices);
+    let worker_count = connection_limit.min(initial_queue.len()).max(1);
+    let work_queue = Arc::new(Mutex::new(initial_queue));
+    progress::update_connection_message(&progress, 0, worker_count);
 
-        for work in work_items {
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(worker_count);
+
+        for _ in 0..worker_count {
             let client_ref = client.clone();
             let url = url.clone();
             let temp_path = temp_path_buf.clone();
             let progress = progress.clone();
             let state = state.clone();
-            let connection_counter = active_connections_for_threads.clone();
-            let total_connections = total_connections_for_threads;
+            let queue = work_queue.clone();
+            let connection_counter = active_connections.clone();
+            let total_connections = worker_count;
             let max_attempts = max_retries.max(1);
 
             handles.push(scope.spawn(move || -> Result<()> {
-                let PartWork { index, start, end } = work;
-                let part_label = format!("part {}", index);
+                loop {
+                    let index = {
+                        let mut guard = queue.lock().unwrap();
+                        guard.pop_front()
+                    };
+                    let Some(index) = index else {
+                        break;
+                    };
 
-                retry(&part_label, max_attempts, || {
-                    let part_length = end.saturating_sub(start).saturating_add(1);
-                    let downloaded = {
+                    let (start, end) = {
                         let guard = state.lock().unwrap();
                         guard
                             .parts
                             .get(index)
-                            .map(|entry| entry.downloaded.min(part_length))
-                            .unwrap_or(0)
+                            .map(|entry| (entry.start, entry.end))
+                            .unwrap_or((0, 0))
                     };
-                    if downloaded >= part_length {
-                        return Ok(());
+                    if start > end {
+                        continue;
                     }
 
-                    let _connection_guard = ActiveConnectionGuard::new(
-                        connection_counter.clone(),
-                        &progress,
-                        total_connections,
-                    );
+                    let part_label = format!("part {}", index);
 
-                    let range_start = start.saturating_add(downloaded);
-                    let request = client_ref
-                        .get(url.clone())
-                        .header("X-Serve-Client", CLIENT_HEADER_VALUE)
-                        .header(RANGE, format!("bytes={}-{}", range_start, end));
-
-                    let mut response = request
-                        .send()
-                        .with_context(|| format!("request failed for part {}", index))?
-                        .error_for_status()
-                        .with_context(|| format!("server returned error for part {}", index))?;
-
-                    if response.status() != StatusCode::PARTIAL_CONTENT {
-                        return Err(anyhow!(
-                            "server did not honor range request for part {}",
-                            index
-                        ));
-                    }
-
-                    let mut local_downloaded = downloaded.min(part_length);
-                    let mut remaining = part_length.saturating_sub(local_downloaded);
-                    let mut buffer = vec![0u8; 16 * 1024];
-                    let mut last_persisted = local_downloaded;
-
-                    let mut file = OpenOptions::new()
-                        .create(true)
-                        .write(true)
-                        .open(&temp_path)
-                        .with_context(|| {
-                            format!("failed to open temp file {}", temp_path.display())
-                        })?;
-                    file.seek(SeekFrom::Start(start.saturating_add(local_downloaded)))
-                        .with_context(|| {
-                            format!("failed to seek temp file {}", temp_path.display())
-                        })?;
-                    let mut writer = BufWriter::new(file);
-
-                    while remaining > 0 {
-                        let to_read = remaining.min(buffer.len() as u64) as usize;
-                        let read = response.read(&mut buffer[..to_read]).with_context(|| {
-                            format!("failed reading response for part {}", index)
-                        })?;
-                        if read == 0 {
-                            break;
+                    retry(&part_label, max_attempts, || {
+                        let part_length = end.saturating_sub(start).saturating_add(1);
+                        let downloaded = {
+                            let guard = state.lock().unwrap();
+                            guard
+                                .parts
+                                .get(index)
+                                .map(|entry| entry.downloaded.min(part_length))
+                                .unwrap_or(0)
+                        };
+                        if downloaded >= part_length {
+                            return Ok(());
                         }
 
-                        writer.write_all(&buffer[..read]).with_context(|| {
-                            format!("failed writing part {} to temp file", index)
-                        })?;
-                        remaining -= read as u64;
-                        local_downloaded += read as u64;
-                        progress.inc(read as u64);
+                        let _connection_guard = ActiveConnectionGuard::new(
+                            connection_counter.clone(),
+                            &progress,
+                            total_connections,
+                        );
 
-                        if local_downloaded.saturating_sub(last_persisted)
-                            >= PARTIAL_STATE_UPDATE_THRESHOLD
-                        {
+                        let range_start = start.saturating_add(downloaded);
+                        let request = client_ref
+                            .get(url.clone())
+                            .header("X-Serve-Client", CLIENT_HEADER_VALUE)
+                            .header(RANGE, format!("bytes={}-{}", range_start, end));
+
+                        let mut response = request
+                            .send()
+                            .with_context(|| format!("request failed for part {}", index))?
+                            .error_for_status()
+                            .with_context(|| format!("server returned error for part {}", index))?;
+
+                        if response.status() != StatusCode::PARTIAL_CONTENT {
+                            return Err(anyhow!(
+                                "server did not honor range request for part {}",
+                                index
+                            ));
+                        }
+
+                        let mut local_downloaded = downloaded.min(part_length);
+                        let mut remaining = part_length.saturating_sub(local_downloaded);
+                        let mut buffer = vec![0u8; 16 * 1024];
+                        let mut last_persisted = local_downloaded;
+
+                        let mut file = OpenOptions::new()
+                            .create(true)
+                            .write(true)
+                            .open(&temp_path)
+                            .with_context(|| {
+                                format!("failed to open temp file {}", temp_path.display())
+                            })?;
+                        file.seek(SeekFrom::Start(start.saturating_add(local_downloaded)))
+                            .with_context(|| {
+                                format!("failed to seek temp file {}", temp_path.display())
+                            })?;
+                        let mut writer = BufWriter::new(file);
+
+                        while remaining > 0 {
+                            let to_read = remaining.min(buffer.len() as u64) as usize;
+                            let read =
+                                response.read(&mut buffer[..to_read]).with_context(|| {
+                                    format!("failed reading response for part {}", index)
+                                })?;
+                            if read == 0 {
+                                break;
+                            }
+
+                            writer.write_all(&buffer[..read]).with_context(|| {
+                                format!("failed writing part {} to temp file", index)
+                            })?;
+                            remaining -= read as u64;
+                            local_downloaded += read as u64;
+                            progress.inc(read as u64);
+
+                            if local_downloaded.saturating_sub(last_persisted)
+                                >= PARTIAL_STATE_UPDATE_THRESHOLD
+                            {
+                                let mut guard = state.lock().unwrap();
+                                guard.set_downloaded(index, local_downloaded);
+                                save_partial_state(&temp_path, &guard);
+                                last_persisted = local_downloaded;
+                            }
+                        }
+
+                        writer.flush()?;
+
+                        if local_downloaded > last_persisted {
                             let mut guard = state.lock().unwrap();
                             guard.set_downloaded(index, local_downloaded);
                             save_partial_state(&temp_path, &guard);
-                            last_persisted = local_downloaded;
                         }
-                    }
 
-                    writer.flush()?;
+                        if remaining > 0 {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::Interrupted,
+                                format!(
+                                    "download interrupted for part {} ({} bytes remaining)",
+                                    index, remaining
+                                ),
+                            )
+                            .into());
+                        }
 
-                    if local_downloaded > last_persisted {
-                        let mut guard = state.lock().unwrap();
-                        guard.set_downloaded(index, local_downloaded);
-                        save_partial_state(&temp_path, &guard);
-                    }
+                        Ok(())
+                    })?;
+                }
 
-                    if remaining > 0 {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::Interrupted,
-                            format!(
-                                "download interrupted for part {} ({} bytes remaining)",
-                                index, remaining
-                            ),
-                        )
-                        .into());
-                    }
-
-                    Ok(())
-                })
+                Ok(())
             }));
         }
 
@@ -594,7 +618,7 @@ fn download_with_multiple_connections(
     progress::update_connection_message(
         &progress,
         active_connections.load(Ordering::SeqCst),
-        total_connections,
+        worker_count,
     );
 
     let final_state = match Arc::try_unwrap(state) {
@@ -668,25 +692,30 @@ fn download_to_single_file(
         partial_state = None;
     }
 
-    let part_count = connections.max(1) as usize;
-
     if let Some(total) = total {
-        if accept_ranges && part_count > 1 {
-            let mut state =
-                partial_state.unwrap_or_else(|| PartialDownloadState::new(Some(total), part_count));
-            if state.part_count != part_count {
-                eprintln!(
-                    "resuming multi-connection download with {} connections to match existing partial data",
-                    state.part_count
-                );
+        if accept_ranges && connections > 1 {
+            let chunk_count = chunk_count_for_total(total);
+            if let Some(state) = &partial_state {
+                if state.part_count != chunk_count {
+                    eprintln!(
+                        "existing partial download uses incompatible chunk layout; restarting {}",
+                        output.display()
+                    );
+                    let _ = fs::remove_file(&temp_path);
+                    clear_partial_state(&temp_path);
+                    partial_state = None;
+                }
             }
-            let total_connections = state.part_count.max(1);
+            let mut state = partial_state
+                .unwrap_or_else(|| PartialDownloadState::new(Some(total), chunk_count));
+            let connection_limit = connections.max(1) as usize;
+            let displayed_connections = connection_limit.min(state.part_count.max(1)).max(1);
             state.total = Some(total);
             state.ensure_layout(total);
             let progress = create_progress_bar_with_message(
                 Some(total),
                 label,
-                progress::connection_status_message(0, total_connections),
+                progress::connection_status_message(0, displayed_connections),
             );
             let _final_state = download_with_multiple_connections(
                 client,
@@ -695,6 +724,7 @@ fn download_to_single_file(
                 total,
                 &progress,
                 state,
+                connection_limit,
                 max_retries,
             )?;
             finish_progress(&progress, "Download complete");
