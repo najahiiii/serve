@@ -352,7 +352,7 @@ fn download_temp_path(output: &Path) -> Result<PathBuf> {
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow!("output path lacks valid filename"))?;
-    Ok(parent.join(format!(".{}.tmp", file_name)))
+    Ok(parent.join(format!(".{}.download", file_name)))
 }
 
 struct RangePart {
@@ -1102,11 +1102,11 @@ fn clear_partial_state(temp_path: &Path) {
 }
 
 fn partial_state_path(temp_path: &Path) -> PathBuf {
-    temp_path.with_extension("tmp.state")
+    temp_path.with_extension("download.state")
 }
 
 fn partial_state_tmp_path(temp_path: &Path) -> PathBuf {
-    temp_path.with_extension("tmp.state.tmp")
+    temp_path.with_extension("download.state.part")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
