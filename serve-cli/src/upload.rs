@@ -1,8 +1,9 @@
 use crate::constants::CLIENT_HEADER_VALUE;
 use crate::http::{build_client, normalize_url, parse_json};
 use crate::progress::{create_progress_bar, finish_progress};
+use crate::retry::retry;
 use anyhow::{Context, Result};
-use reqwest::blocking::{Body, RequestBuilder, Response, multipart};
+use reqwest::blocking::{Body, Client, RequestBuilder, Response, multipart};
 use reqwest::header;
 use serde::Deserialize;
 use std::fs::File;
@@ -30,6 +31,7 @@ pub fn upload(
     upload_path: Option<&str>,
     allow_no_ext: bool,
     stream: bool,
+    max_retries: usize,
 ) -> Result<()> {
     let client = build_client()?;
 
@@ -46,13 +48,39 @@ pub fn upload(
         .unwrap_or("upload.bin")
         .to_string();
 
-    let progress = create_progress_bar(Some(file_size), &file_name);
+    retry("upload", max_retries, || {
+        perform_upload_attempt(
+            &client,
+            host,
+            file_path,
+            token,
+            upload_path,
+            allow_no_ext,
+            stream,
+            file_size,
+            &file_name,
+        )
+    })
+}
+
+fn perform_upload_attempt(
+    client: &Client,
+    host: &str,
+    file_path: &str,
+    token: &str,
+    upload_path: Option<&str>,
+    allow_no_ext: bool,
+    stream: bool,
+    file_size: u64,
+    file_name: &str,
+) -> Result<()> {
+    let progress = create_progress_bar(Some(file_size), file_name);
 
     let response = if stream {
         let mut url = normalize_url(host, "upload-stream")?;
         {
             let mut pairs = url.query_pairs_mut();
-            pairs.append_pair("name", &file_name);
+            pairs.append_pair("name", file_name);
             if let Some(path) = upload_path {
                 pairs.append_pair("path", path);
             }
@@ -74,7 +102,7 @@ pub fn upload(
         if let Some(path) = upload_path {
             request = request.header("X-Upload-Path", path);
         }
-        request = request.header("X-Upload-Filename", &file_name);
+        request = request.header("X-Upload-Filename", file_name);
         if allow_no_ext {
             request = request.header("X-Allow-No-Ext", "true");
         }
@@ -88,7 +116,7 @@ pub fn upload(
 
         let mut form = multipart::Form::new().part(
             "file",
-            multipart::Part::reader_with_length(reader, file_size).file_name(file_name),
+            multipart::Part::reader_with_length(reader, file_size).file_name(file_name.to_string()),
         );
 
         if let Some(path) = upload_path {

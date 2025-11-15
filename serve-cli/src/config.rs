@@ -12,6 +12,7 @@ pub struct AppConfig {
     pub token: Option<String>,
     pub upload_path: Option<String>,
     pub allow_no_ext: Option<bool>,
+    pub max_retries: Option<u32>,
 }
 
 #[derive(Debug, Clone)]

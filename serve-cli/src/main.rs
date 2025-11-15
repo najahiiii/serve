@@ -5,6 +5,7 @@ mod download;
 mod http;
 mod list;
 mod progress;
+mod retry;
 mod upload;
 
 use crate::config::{AppConfig, LoadedConfig};
@@ -14,6 +15,8 @@ use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+const DEFAULT_MAX_RETRIES: usize = 10;
 
 #[derive(Parser)]
 #[command(
@@ -25,6 +28,9 @@ struct Cli {
     /// Path to custom configuration file
     #[arg(long, global = true)]
     config: Option<PathBuf>,
+    /// Override maximum retry attempts
+    #[arg(long, global = true)]
+    retries: Option<usize>,
     #[command(subcommand)]
     command: Command,
 }
@@ -87,9 +93,14 @@ enum Command {
 fn main() -> Result<()> {
     cleanup::install_signal_handler();
 
-    let Cli { config, command } = Cli::parse();
+    let Cli {
+        config,
+        retries,
+        command,
+    } = Cli::parse();
     let loaded_config = config::load_config(config.as_deref())?;
     let app_config = loaded_config.data.clone();
+    let retry_attempts = resolve_retries(retries, &app_config);
 
     match command {
         Command::List { host, path } => {
@@ -115,6 +126,7 @@ fn main() -> Result<()> {
                 resolved_path.as_deref(),
                 effective_allow,
                 stream,
+                retry_attempts,
             )
         }
         Command::Download {
@@ -141,6 +153,7 @@ fn main() -> Result<()> {
                 recursive,
                 connections.clamp(1, 16),
                 existing_strategy,
+                retry_attempts,
             )
         }
         Command::Setup => run_setup(config.as_deref(), &app_config),
@@ -168,6 +181,21 @@ fn resolve_upload_path(path_arg: Option<String>, config: &AppConfig) -> Option<S
     path_arg.or_else(|| config.upload_path.clone())
 }
 
+fn resolve_retries(retry_arg: Option<usize>, config: &AppConfig) -> usize {
+    retry_arg
+        .filter(|value| *value > 0)
+        .or_else(|| {
+            config.max_retries.and_then(|value| {
+                if value == 0 {
+                    None
+                } else {
+                    Some(value as usize)
+                }
+            })
+        })
+        .unwrap_or(DEFAULT_MAX_RETRIES)
+}
+
 fn effective_allow_no_ext(flag: bool, config: &AppConfig) -> bool {
     if flag {
         true
@@ -188,12 +216,17 @@ fn run_setup(path_override: Option<&Path>, current: &AppConfig) -> Result<()> {
         "Allow uploads without extension by default",
         current.allow_no_ext.unwrap_or(false),
     )?;
+    let max_retries = prompt_optional_u32(
+        "Max retry attempts (blank to keep/default, '-' to clear)",
+        current.max_retries,
+    )?;
 
     let mut new_config = AppConfig::default();
     new_config.host = Some(host);
     new_config.token = token;
     new_config.upload_path = upload_path;
     new_config.allow_no_ext = Some(allow_no_ext);
+    new_config.max_retries = max_retries;
 
     let saved_path = config::save_config(path_override, &new_config)?;
     println!("Saved configuration to {}", saved_path.display());
@@ -263,6 +296,31 @@ fn prompt_bool(prompt: &str, default: bool) -> Result<bool> {
     }
 }
 
+fn prompt_optional_u32(prompt: &str, current: Option<u32>) -> Result<Option<u32>> {
+    loop {
+        match current {
+            Some(existing) => print!("{} [{}] (blank to keep, '-' to clear): ", prompt, existing),
+            None => print!("{} (blank to skip): ", prompt),
+        }
+        io::stdout().flush().context("failed to flush stdout")?;
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("failed to read input")?;
+        let value = input.trim();
+        if value.is_empty() {
+            return Ok(current);
+        }
+        if value == "-" {
+            return Ok(None);
+        }
+        match value.parse::<u32>() {
+            Ok(parsed) if parsed > 0 => return Ok(Some(parsed)),
+            _ => println!("Please enter a positive integer."),
+        }
+    }
+}
+
 fn show_config(loaded: &LoadedConfig, override_path: Option<&Path>) -> Result<()> {
     let effective_host = resolve_host(None, &loaded.data);
     let effective_path = resolve_upload_path(None, &loaded.data);
@@ -301,5 +359,6 @@ fn show_config(loaded: &LoadedConfig, override_path: Option<&Path>) -> Result<()
         effective_path.as_deref().unwrap_or("<not set>")
     );
     println!("Allow no ext    : {}", allow);
+    println!("Max retries     : {}", resolve_retries(None, &loaded.data));
     Ok(())
 }
