@@ -38,6 +38,18 @@ fn retry_delay(attempt: usize) -> Duration {
     Duration::from_secs(1 << capped)
 }
 
+pub fn total_retry_sleep_seconds(attempts: usize) -> u64 {
+    if attempts <= 1 {
+        return 0;
+    }
+    (1..attempts)
+        .map(|attempt| {
+            let capped = attempt.saturating_sub(1).min(3) as u32;
+            1u64 << capped
+        })
+        .sum()
+}
+
 fn is_retryable_error(err: &Error) -> bool {
     use ErrorKind::*;
 

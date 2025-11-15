@@ -11,6 +11,7 @@ mod upload;
 use crate::config::{AppConfig, LoadedConfig};
 use crate::constants::DEFAULT_HOST;
 use crate::download::ExistingFileStrategy;
+use crate::retry::total_retry_sleep_seconds;
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
 use std::io::{self, Write};
@@ -229,6 +230,7 @@ fn run_setup(path_override: Option<&Path>, current: &AppConfig) -> Result<()> {
     new_config.max_retries = max_retries;
 
     let saved_path = config::save_config(path_override, &new_config)?;
+    println!();
     println!("Saved configuration to {}", saved_path.display());
     println!("Tip: pass --config to use a different configuration path.");
     Ok(())
@@ -359,6 +361,8 @@ fn show_config(loaded: &LoadedConfig, override_path: Option<&Path>) -> Result<()
         effective_path.as_deref().unwrap_or("<not set>")
     );
     println!("Allow no ext    : {}", allow);
-    println!("Max retries     : {}", resolve_retries(None, &loaded.data));
+    let retries = resolve_retries(None, &loaded.data);
+    let sleep_secs = total_retry_sleep_seconds(retries);
+    println!("Max retries     : {} (max sleep ~{}s)", retries, sleep_secs);
     Ok(())
 }
