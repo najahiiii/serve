@@ -1,19 +1,9 @@
 use chrono::{DateTime, Local};
 use pathdiff::diff_paths;
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-const FRAGMENT: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'#')
-    .add(b'<')
-    .add(b'>')
-    .add(b'?')
-    .add(b'`');
 
 pub fn format_size(size_bytes: u64) -> String {
     if size_bytes == 0 {
@@ -61,16 +51,6 @@ pub fn secure_filename(name: &str) -> Option<String> {
         None
     } else {
         Some(sanitized.to_string())
-    }
-}
-
-pub fn encode_link(path: &str) -> String {
-    let needs_leading_slash = !path.starts_with('/');
-    let encoded = utf8_percent_encode(path, FRAGMENT).to_string();
-    if needs_leading_slash {
-        format!("/{encoded}")
-    } else {
-        encoded
     }
 }
 

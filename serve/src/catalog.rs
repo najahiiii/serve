@@ -212,6 +212,23 @@ impl Catalog {
             .map_err(Into::into)
     }
 
+    pub async fn id_for_path(&self, path: &str) -> Result<Option<String>, CatalogError> {
+        let normalized = path.trim_matches('/').to_string();
+        self.conn
+            .call(move |conn| {
+                let result = conn
+                    .query_row(
+                        "SELECT id FROM entries WHERE path = ?1",
+                        [normalized.as_str()],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                Ok(result)
+            })
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn entry_detail(&self, id: &str) -> Result<Option<CatalogEntryDetail>, CatalogError> {
         let id = id.to_string();
         self.conn

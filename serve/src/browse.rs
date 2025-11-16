@@ -19,8 +19,8 @@ use crate::http_utils::{build_base_url, client_ip, client_user_agent, host_heade
 use crate::map_io_error;
 use crate::template;
 use crate::utils::{
-    encode_link, format_modified_time, format_size, is_blacklisted, parent_relative_path,
-    relative_path_string, resolve_within_root, unix_timestamp,
+    format_modified_time, format_size, is_blacklisted, parent_relative_path, relative_path_string,
+    resolve_within_root, unix_timestamp,
 };
 use crate::{AppError, AppState, NOT_FOUND_MESSAGE, POWERED_BY, STREAM_BUFFER_BYTES};
 
@@ -471,7 +471,7 @@ async fn render_directory(
     }
 
     let mut rows = String::new();
-    if let Some(parent_link) = parent_link(requested_path) {
+    if let Some(parent_link) = parent_link(state, requested_path).await? {
         rows.push_str(&format!(
             r#"
                 <tr>
@@ -482,7 +482,7 @@ async fn render_directory(
                     <td class="date"></td>
                 </tr>
             "#,
-            link = encode_link(&parent_link)
+            link = parent_link
         ));
     }
 
@@ -672,9 +672,9 @@ fn parse_range_header(value: &str, size: u64) -> Result<Option<(u64, u64)>, ()> 
     }
 }
 
-fn parent_link(requested_path: &str) -> Option<String> {
+async fn parent_link(state: &AppState, requested_path: &str) -> Result<Option<String>, AppError> {
     if requested_path.trim().is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let mut len = 0usize;
@@ -683,24 +683,38 @@ fn parent_link(requested_path: &str) -> Option<String> {
             Component::Normal(_) => len += 1,
             Component::ParentDir | Component::RootDir => {
                 if len == 0 {
-                    return None;
+                    return Ok(None);
                 }
                 len -= 1;
             }
             Component::CurDir => {}
-            Component::Prefix(_) => return None,
+            Component::Prefix(_) => return Ok(None),
         }
     }
 
     if len == 0 {
-        Some(String::new())
-    } else {
-        let parts: Vec<&str> = requested_path
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .take(len)
-            .collect();
-        Some(parts.join("/"))
+        return Ok(Some("/list?id=root".to_string()));
+    }
+
+    let parts: Vec<&str> = requested_path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .take(len)
+        .collect();
+    let parent_path = parts.join("/");
+
+    if parent_path.is_empty() {
+        return Ok(Some("/list?id=root".to_string()));
+    }
+
+    match state
+        .catalog
+        .id_for_path(&parent_path)
+        .await
+        .map_err(|err| AppError::Internal(err.to_string()))?
+    {
+        Some(id) => Ok(Some(format!("/list?id={}", id))),
+        None => Ok(None),
     }
 }
 
