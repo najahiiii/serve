@@ -197,14 +197,14 @@ async fn run_server(args: RunArgs) -> Result<(), AppError> {
         addr,
         state.canonical_root.display()
     );
-    axum::serve(
-        tokio::net::TcpListener::bind(addr)
-            .await
-            .map_err(map_io_error)?,
-        router,
-    )
-    .await
-    .map_err(|err| {
+    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|err| {
+        error!("Failed to bind to {}: {}", addr, err);
+        AppError::Config(format!("Failed to bind to {addr}: {err}"))
+    })?;
+
+    axum::serve(listener, router)
+        .await
+        .map_err(|err| {
         error!("Server error: {}", err);
         AppError::Internal("Server error".to_string())
     })
