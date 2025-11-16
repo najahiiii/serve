@@ -14,7 +14,7 @@ use axum::{
 };
 use clap::{Args, Parser, Subcommand};
 use config::{Config, RootSource};
-use rand::{Rng, distributions::Alphanumeric};
+use rand::{Rng, distributions::Alphanumeric, rngs::OsRng};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::{
@@ -52,7 +52,7 @@ fn default_config_body(token: &str) -> String {
 }
 
 fn generate_upload_token() -> String {
-    rand::thread_rng()
+    OsRng
         .sample_iter(&Alphanumeric)
         .take(GENERATED_TOKEN_LEN)
         .map(char::from)
@@ -153,21 +153,18 @@ fn effective_config(args: &RunArgs) -> Result<(Config, PathBuf), AppError> {
         config.root_source = RootSource::Cli;
     }
 
+    let current_dir = || env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config_dir = config.config_dir.clone().unwrap_or_else(|| current_dir());
+
     let base_root = match config.root_override.clone() {
         Some(root) if root.is_absolute() => root,
-        Some(root) => {
-            let base_dir = match config.root_source {
-                RootSource::ConfigFile => config
-                    .config_dir
-                    .clone()
-                    .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
-                RootSource::Cli | RootSource::EnvVar | RootSource::Default => {
-                    env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                }
-            };
-            base_dir.join(root)
-        }
-        None => env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        Some(root) => match config.root_source {
+            RootSource::ConfigFile | RootSource::EnvVar | RootSource::Default => {
+                config_dir.join(root)
+            }
+            RootSource::Cli => current_dir().join(root),
+        },
+        None => config_dir,
     };
     let canonical_root = base_root
         .canonicalize()
@@ -243,7 +240,9 @@ async fn run_server(args: RunArgs) -> Result<(), AppError> {
     );
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|err| {
         error!("Failed to bind to {}: {}", addr, err);
-        AppError::Config(format!("Failed to bind to {addr}: {err}"))
+        AppError::Config(format!(
+            "Failed to bind to {addr}. Ensure the port is free and you have permission."
+        ))
     })?;
 
     axum::serve(listener, router).await.map_err(|err| {
@@ -336,6 +335,7 @@ fn init_config_file() -> Result<(), Box<dyn std::error::Error>> {
     let mut file = options.open(&path)?;
     file.write_all(body.as_bytes())?;
     file.flush()?;
+    file.sync_all()?;
 
     println!("Config written to {}", path.display());
     if token.is_empty() {
