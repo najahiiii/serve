@@ -12,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use crate::catalog::{CatalogEntry, EntryInfo};
 use crate::http_utils::{build_base_url, client_ip, client_user_agent, host_header};
@@ -677,20 +677,30 @@ fn parent_link(requested_path: &str) -> Option<String> {
         return None;
     }
 
-    let mut parts: Vec<&str> = requested_path
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .collect();
-
-    if parts.is_empty() {
-        return Some("/".to_string());
+    let mut len = 0usize;
+    for component in Path::new(requested_path).components() {
+        match component {
+            Component::Normal(_) => len += 1,
+            Component::ParentDir | Component::RootDir => {
+                if len == 0 {
+                    return None;
+                }
+                len -= 1;
+            }
+            Component::CurDir => {}
+            Component::Prefix(_) => return None,
+        }
     }
 
-    parts.pop();
-    if parts.is_empty() {
-        Some("/".to_string())
+    if len == 0 {
+        Some(String::new())
     } else {
-        Some(format!("/{}", parts.join("/")))
+        let parts: Vec<&str> = requested_path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .take(len)
+            .collect();
+        Some(parts.join("/"))
     }
 }
 
