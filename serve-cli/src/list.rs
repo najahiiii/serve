@@ -24,14 +24,15 @@ pub struct ListEntry {
     #[serde(default)]
     pub _size_bytes: u64,
     pub modified: String,
-    pub url: String,
+    #[serde(default)]
+    pub _legacy_url: String,
     pub is_dir: bool,
     #[serde(default)]
     pub mime_type: String,
     #[serde(default)]
-    pub list_url: Option<String>,
+    pub _list_url: Option<String>,
     #[serde(default)]
-    pub download_url: Option<String>,
+    pub _download_url: Option<String>,
 }
 
 #[derive(Tabled)]
@@ -46,12 +47,10 @@ struct TableEntry {
     size: String,
     #[tabled(rename = "MIME")]
     mime: String,
-    #[tabled(rename = "Modified")]
-    modified: String,
     #[tabled(rename = "Type")]
     kind: String,
-    #[tabled(rename = "URL")]
-    url: String,
+    #[tabled(rename = "Modified")]
+    modified: String,
 }
 
 pub fn list(host: &str, id: &str) -> Result<()> {
@@ -110,11 +109,6 @@ pub fn list(host: &str, id: &str) -> Result<()> {
             } else {
                 "file".into()
             },
-            url: entry
-                .download_url
-                .clone()
-                .or_else(|| entry.list_url.clone())
-                .unwrap_or(entry.url),
         })
         .collect();
 

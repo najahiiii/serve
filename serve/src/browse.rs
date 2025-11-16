@@ -1,11 +1,12 @@
+use axum::Json;
 use axum::body::Body;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::Response;
-use chrono::{Datelike, Local};
+use chrono::{Datelike, Local, TimeZone};
 use html_escape::encode_text;
 use mime_guess::MimeGuess;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
@@ -41,6 +42,28 @@ pub(crate) struct ListIdQuery {
     pub(crate) id: String,
     #[serde(default)]
     pub(crate) view: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct InfoQuery {
+    pub(crate) id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct InfoPayload {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) path: String,
+    pub(crate) mime_type: String,
+    pub(crate) is_dir: bool,
+    pub(crate) size_bytes: u64,
+    pub(crate) size_display: String,
+    pub(crate) created: String,
+    pub(crate) modified: String,
+    pub(crate) parent_id: Option<String>,
+    pub(crate) list_url: Option<String>,
+    pub(crate) view_url: Option<String>,
+    pub(crate) download_url: Option<String>,
 }
 
 pub(crate) async fn get_root() -> Result<Response, AppError> {
@@ -203,6 +226,70 @@ pub(crate) async fn list_by_id(
         ViewQuery { view: query.view },
     )
     .await
+}
+
+pub(crate) async fn get_info(
+    State(state): State<AppState>,
+    Query(query): Query<InfoQuery>,
+) -> Result<Json<InfoPayload>, AppError> {
+    let id = query.id.trim();
+    if id.is_empty() {
+        return Err(AppError::BadRequest("Missing id parameter".to_string()));
+    }
+
+    let detail = state
+        .catalog
+        .entry_detail(id)
+        .await
+        .map_err(|err| AppError::Internal(err.to_string()))?
+        .ok_or_else(|| AppError::NotFound(NOT_FOUND_MESSAGE.to_string()))?;
+
+    let path = if detail.relative_path.trim().is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", detail.relative_path.trim_start_matches('/'))
+    };
+    let mime = detail.mime_type.clone().unwrap_or_else(|| {
+        if detail.is_dir {
+            "inode/directory".to_string()
+        } else {
+            "application/octet-stream".to_string()
+        }
+    });
+    let size_display = format_size(detail.size_bytes);
+    let created = format_timestamp(detail.last_seen);
+    let modified = format_timestamp(detail.modified);
+    let list_url = if detail.is_dir {
+        Some(format!("/list?id={}", detail.id))
+    } else {
+        None
+    };
+    let download_url = if detail.is_dir {
+        None
+    } else {
+        Some(format!("/download?id={}", detail.id))
+    };
+    let view_url = if detail.is_dir {
+        list_url.clone()
+    } else {
+        Some(format!("/download?id={}&view=true", detail.id))
+    };
+
+    Ok(Json(InfoPayload {
+        id: detail.id,
+        name: detail.name,
+        path,
+        mime_type: mime,
+        is_dir: detail.is_dir,
+        size_bytes: detail.size_bytes,
+        size_display,
+        created,
+        modified,
+        parent_id: detail.parent_id,
+        list_url,
+        view_url,
+        download_url,
+    }))
 }
 
 async fn render_directory(
@@ -639,4 +726,14 @@ struct DirectoryEntry {
     relative_path: String,
     browse_link: String,
     download_link: String,
+}
+
+fn format_timestamp(timestamp: i64) -> String {
+    if timestamp <= 0 {
+        return "-".to_string();
+    }
+    match Local.timestamp_opt(timestamp, 0).single() {
+        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+        None => "-".to_string(),
+    }
 }

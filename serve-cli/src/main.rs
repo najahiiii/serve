@@ -3,6 +3,7 @@ mod config;
 mod constants;
 mod download;
 mod http;
+mod info;
 mod list;
 mod progress;
 mod retry;
@@ -102,6 +103,13 @@ enum Command {
         #[arg(long, default_value = "root")]
         id: String,
     },
+    /// Show URLs and metadata for a specific entry ID
+    Info {
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        id: String,
+    },
     /// Interactive configuration helper
     Setup,
     /// Display serve-cli version information
@@ -174,6 +182,10 @@ fn main() -> Result<()> {
         Command::List { host, id } => {
             let resolved_host = resolve_host(host, &app_config);
             list::list(&resolved_host, &id)
+        }
+        Command::Info { host, id } => {
+            let resolved_host = resolve_host(host, &app_config);
+            info::show_info(&resolved_host, &id)
         }
         Command::Setup => run_setup(config.as_deref(), &app_config),
         Command::Version => {

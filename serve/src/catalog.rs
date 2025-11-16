@@ -63,6 +63,19 @@ pub struct Catalog {
     conn: Connection,
 }
 
+#[derive(Debug, Clone)]
+pub struct CatalogEntryDetail {
+    pub id: String,
+    pub relative_path: String,
+    pub name: String,
+    pub parent_id: Option<String>,
+    pub is_dir: bool,
+    pub size_bytes: u64,
+    pub mime_type: Option<String>,
+    pub modified: i64,
+    pub last_seen: i64,
+}
+
 impl Catalog {
     pub async fn new(path: &Path) -> Result<Self, CatalogError> {
         if let Some(parent) = path.parent() {
@@ -189,6 +202,37 @@ impl Catalog {
                     Ok(Some(CatalogEntry {
                         relative_path: path,
                         is_dir: is_dir != 0,
+                    }))
+                } else {
+                    Ok(None)
+                }
+            })
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn entry_detail(&self, id: &str) -> Result<Option<CatalogEntryDetail>, CatalogError> {
+        let id = id.to_string();
+        self.conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, path, name, parent_id, is_dir, size_bytes, mime_type, modified, last_seen
+                     FROM entries WHERE id = ?1",
+                )?;
+                let mut rows = stmt.query([id.as_str()])?;
+                if let Some(row) = rows.next()? {
+                    let is_dir: i64 = row.get(4)?;
+                    let size: i64 = row.get(5)?;
+                    Ok(Some(CatalogEntryDetail {
+                        id: row.get(0)?,
+                        relative_path: row.get(1)?,
+                        name: row.get(2)?,
+                        parent_id: row.get(3)?,
+                        is_dir: is_dir != 0,
+                        size_bytes: size.max(0) as u64,
+                        mime_type: row.get(6)?,
+                        modified: row.get(7)?,
+                        last_seen: row.get(8)?,
                     }))
                 } else {
                     Ok(None)

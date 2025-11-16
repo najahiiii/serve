@@ -245,6 +245,7 @@ async fn run_server(args: RunArgs) -> Result<(), AppError> {
         .route("/", get(browse::get_root))
         .route("/download", get(browse::download_by_id))
         .route("/list", get(browse::list_by_id))
+        .route("/info", get(browse::get_info))
         .route("/upload", post(uploads::handle_upload))
         .route(
             "/upload-stream",
