@@ -18,12 +18,27 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 const DEFAULT_MAX_RETRIES: usize = 10;
+const VERSION_SUMMARY: &str = concat!(
+    "serve-cli: ",
+    env!("CARGO_PKG_VERSION"),
+    "\nRust: ",
+    env!("SERVE_CLI_RUSTC_VERSION"),
+    "\nOS/Arch: ",
+    env!("SERVE_CLI_TARGET_OS"),
+    "/",
+    env!("SERVE_CLI_TARGET_ARCH"),
+    "\nCommit: ",
+    env!("SERVE_CLI_GIT_COMMIT"),
+    "\nBuilt: ",
+    env!("SERVE_CLI_BUILD_TIME")
+);
 
 #[derive(Parser)]
 #[command(
     name = "serve-cli",
-    version,
-    about = "CLI helper for the serve file server"
+    version = env!("CARGO_PKG_VERSION"),
+    about = "CLI helper for the serve file server",
+    disable_version_flag = true
 )]
 struct Cli {
     /// Path to custom configuration file
@@ -38,30 +53,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// List directory contents from the server
-    List {
-        /// Base host URL (e.g. https://files.example.com)
-        #[arg(long)]
-        host: Option<String>,
-        /// Path to list (e.g. / or dir/subdir)
-        #[arg(long, default_value = "/")]
-        path: String,
-    },
-    /// Upload a file to the server
-    Upload {
-        #[arg(long)]
-        host: Option<String>,
-        #[arg(long)]
-        file: String,
-        #[arg(long)]
-        token: Option<String>,
-        #[arg(long)]
-        upload_path: Option<String>,
-        #[arg(long, default_value_t = false)]
-        allow_no_ext: bool,
-        #[arg(long, default_value_t = false)]
-        stream: bool,
-    },
+    /// Display the currently configured defaults
+    Config,
     /// Download a file from the server
     Download {
         #[arg(long)]
@@ -85,10 +78,34 @@ enum Command {
         #[arg(long, default_value_t = false, conflicts_with = "skip")]
         dup: bool,
     },
+    /// Upload a file to the server
+    Upload {
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        file: String,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long)]
+        upload_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        allow_no_ext: bool,
+        #[arg(long, default_value_t = false)]
+        stream: bool,
+    },
+    /// List directory contents from the server
+    List {
+        /// Base host URL (e.g. https://files.example.com)
+        #[arg(long)]
+        host: Option<String>,
+        /// Path to list (e.g. / or dir/subdir)
+        #[arg(long, default_value = "/")]
+        path: String,
+    },
     /// Interactive configuration helper
     Setup,
-    /// Display the currently configured defaults
-    Config,
+    /// Display serve-cli version information
+    Version,
 }
 
 fn main() -> Result<()> {
@@ -104,32 +121,7 @@ fn main() -> Result<()> {
     let retry_attempts = resolve_retries(retries, &app_config);
 
     match command {
-        Command::List { host, path } => {
-            let resolved_host = resolve_host(host, &app_config);
-            list::list(&resolved_host, &path)
-        }
-        Command::Upload {
-            host,
-            file,
-            token,
-            upload_path,
-            allow_no_ext,
-            stream,
-        } => {
-            let resolved_host = resolve_host(host, &app_config);
-            let resolved_token = resolve_token(token, &app_config)?;
-            let resolved_path = resolve_upload_path(upload_path, &app_config);
-            let effective_allow = effective_allow_no_ext(allow_no_ext, &app_config);
-            upload::upload(
-                &resolved_host,
-                &file,
-                &resolved_token,
-                resolved_path.as_deref(),
-                effective_allow,
-                stream,
-                retry_attempts,
-            )
-        }
+        Command::Config => show_config(&loaded_config, config.as_deref()),
         Command::Download {
             host,
             path,
@@ -157,8 +149,37 @@ fn main() -> Result<()> {
                 retry_attempts,
             )
         }
+        Command::Upload {
+            host,
+            file,
+            token,
+            upload_path,
+            allow_no_ext,
+            stream,
+        } => {
+            let resolved_host = resolve_host(host, &app_config);
+            let resolved_token = resolve_token(token, &app_config)?;
+            let resolved_path = resolve_upload_path(upload_path, &app_config);
+            let effective_allow = effective_allow_no_ext(allow_no_ext, &app_config);
+            upload::upload(
+                &resolved_host,
+                &file,
+                &resolved_token,
+                resolved_path.as_deref(),
+                effective_allow,
+                stream,
+                retry_attempts,
+            )
+        }
+        Command::List { host, path } => {
+            let resolved_host = resolve_host(host, &app_config);
+            list::list(&resolved_host, &path)
+        }
         Command::Setup => run_setup(config.as_deref(), &app_config),
-        Command::Config => show_config(&loaded_config, config.as_deref()),
+        Command::Version => {
+            println!("{VERSION_SUMMARY}");
+            Ok(())
+        }
     }
 }
 

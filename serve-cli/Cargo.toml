@@ -15,3 +15,6 @@ indicatif = "0.17"
 directories = "5"
 toml = "0.8"
 ctrlc = "3"
+
+[build-dependencies]
+time = { version = "0.3", features = ["formatting"] }
