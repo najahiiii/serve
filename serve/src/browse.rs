@@ -24,12 +24,13 @@ use crate::utils::{
 };
 use crate::{AppError, AppState, NOT_FOUND_MESSAGE, POWERED_BY, STREAM_BUFFER_BYTES};
 
-const PREVIEW_AGENTS: [&str; 5] = [
+const PREVIEW_AGENTS: [&str; 6] = [
     "TelegramBot",
     "Slackbot-LinkExpanding",
     "Discordbot",
     "Facebot",
     "Twitterbot",
+    "WhatsApp",
 ];
 
 #[derive(Debug, Deserialize)]
