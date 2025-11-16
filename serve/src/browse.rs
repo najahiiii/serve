@@ -14,7 +14,7 @@ use tokio_util::io::ReaderStream;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use crate::catalog::{CatalogEntry, EntryInfo};
+use crate::catalog::{CatalogEntry, CatalogEntryDetail, EntryInfo};
 use crate::http_utils::{build_base_url, client_ip, client_user_agent, host_header};
 use crate::map_io_error;
 use crate::template;
@@ -23,6 +23,14 @@ use crate::utils::{
     resolve_within_root, unix_timestamp,
 };
 use crate::{AppError, AppState, NOT_FOUND_MESSAGE, POWERED_BY, STREAM_BUFFER_BYTES};
+
+const PREVIEW_AGENTS: [&str; 5] = [
+    "TelegramBot",
+    "Slackbot-LinkExpanding",
+    "Discordbot",
+    "Facebot",
+    "Twitterbot",
+];
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ViewQuery {
@@ -190,6 +198,16 @@ pub(crate) async fn download_by_id(
         return Err(AppError::BadRequest(
             "ID refers to a directory; download directories via path".to_string(),
         ));
+    }
+
+    if should_render_preview(&headers) && query.view != Some(false) {
+        let detail = state
+            .catalog
+            .entry_detail(id)
+            .await
+            .map_err(|err| AppError::Internal(err.to_string()))?
+            .ok_or_else(|| AppError::NotFound(NOT_FOUND_MESSAGE.to_string()))?;
+        return render_file_preview(&detail, &headers);
     }
 
     serve_entry_by_relative_path(
@@ -765,4 +783,51 @@ fn format_timestamp(timestamp: i64) -> String {
         Some(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
         None => "-".to_string(),
     }
+}
+
+fn should_render_preview(headers: &HeaderMap) -> bool {
+    if headers.contains_key(header::RANGE) {
+        return false;
+    }
+    headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(|ua| PREVIEW_AGENTS.iter().any(|needle| ua.contains(needle)))
+        .unwrap_or(false)
+}
+
+fn render_file_preview(
+    detail: &CatalogEntryDetail,
+    headers: &HeaderMap,
+) -> Result<Response, AppError> {
+    let base = build_base_url(headers);
+    let trimmed = base.trim_end_matches('/');
+    let download_url = format!("{}/download?id={}", trimmed, detail.id);
+    let title = encode_text(&detail.name);
+    let size_display = format_size(detail.size_bytes);
+    let mime = detail
+        .mime_type
+        .clone()
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let description = format!("{} · {}", size_display, mime);
+    let html = format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+<title>{title}</title>\
+<meta property=\"og:title\" content=\"{title}\"/>\
+<meta property=\"og:description\" content=\"{description}\"/>\
+<meta property=\"og:type\" content=\"article\"/>\
+<meta property=\"og:url\" content=\"{download}\"/>\
+<meta name=\"twitter:card\" content=\"summary\"/>\
+<link rel=\"canonical\" href=\"{download}\"/></head>\
+<body><p>Download <a href=\"{download}\">{title}</a></p></body></html>",
+        title = title,
+        description = encode_text(&description),
+        download = download_url
+    );
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(Body::from(html))
+        .map_err(|err| AppError::Internal(err.to_string()))
 }
