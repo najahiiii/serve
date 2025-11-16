@@ -1,4 +1,5 @@
 mod browse;
+mod catalog;
 mod config;
 mod http_utils;
 mod template;
@@ -12,6 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
+use catalog::{Catalog, CatalogCommand, CatalogWorker};
 use clap::{Args, Parser, Subcommand};
 use config::{Config, RootSource};
 use rand::{Rng, distributions::Alphanumeric, rngs::OsRng};
@@ -24,6 +26,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
+use tokio::sync::mpsc;
 use tower::ServiceBuilder;
 use tower_http::{
     compression::CompressionLayer, set_header::SetResponseHeaderLayer, trace::TraceLayer,
@@ -113,6 +116,8 @@ enum Command {
 pub(crate) struct AppState {
     pub(crate) config: Arc<Config>,
     pub(crate) canonical_root: Arc<PathBuf>,
+    pub(crate) catalog: Arc<Catalog>,
+    pub(crate) catalog_events: mpsc::Sender<CatalogCommand>,
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
@@ -182,9 +187,36 @@ async fn run_server(args: RunArgs) -> Result<(), AppError> {
         .try_into()
         .unwrap_or(usize::MAX);
 
+    let config = Arc::new(config);
+    let canonical_root = Arc::new(canonical_root);
+
+    let storage_dir = config.storage_dir();
+    fs::create_dir_all(&storage_dir)
+        .map_err(|err| AppError::Internal(format!("Failed to prepare config dir: {err}")))?;
+    let catalog_path = storage_dir.join("catalog.db");
+    let catalog = Arc::new(
+        Catalog::new(&catalog_path)
+            .await
+            .map_err(|err| AppError::Internal(format!("Failed to initialize catalog: {err:?}")))?,
+    );
+
+    let (catalog_tx, catalog_rx) = mpsc::channel(8);
+    let worker = CatalogWorker::new(
+        catalog.clone(),
+        canonical_root.clone(),
+        Arc::new(config.blacklisted_files.clone()),
+        catalog_rx,
+    );
+    tokio::spawn(async move {
+        worker.run().await;
+    });
+    let _ = catalog_tx.try_send(CatalogCommand::RefreshAll);
+
     let state = AppState {
-        config: Arc::new(config),
-        canonical_root: Arc::new(canonical_root),
+        config: config.clone(),
+        canonical_root: canonical_root.clone(),
+        catalog: catalog.clone(),
+        catalog_events: catalog_tx.clone(),
     };
 
     let compression = CompressionLayer::new().compress_when(
@@ -315,8 +347,7 @@ fn show_config(args: ShowConfigArgs) -> Result<(), AppError> {
 }
 
 fn init_config_file() -> Result<(), Box<dyn std::error::Error>> {
-    let home = env::var("HOME").or_else(|_| env::var("USERPROFILE"))?;
-    let dir = PathBuf::from(home).join(".config").join("serve");
+    let dir = config::default_config_dir();
     fs::create_dir_all(&dir)?;
 
     let path = dir.join("config.toml");

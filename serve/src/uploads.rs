@@ -12,9 +12,12 @@ use serde::Deserialize;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
+use crate::catalog::{CatalogCommand, EntryInfo};
 use crate::http_utils::{build_base_url, client_ip, client_user_agent};
 use crate::map_io_error;
-use crate::utils::{is_allowed_file, resolve_within_root, secure_filename};
+use crate::utils::{
+    is_allowed_file, parent_relative_path, resolve_within_root, secure_filename, unix_timestamp,
+};
 use crate::{AppError, AppState, POWERED_BY};
 
 #[derive(Debug, Deserialize)]
@@ -183,6 +186,25 @@ pub(crate) async fn handle_upload(
             .to_string_lossy()
             .replace(std::path::MAIN_SEPARATOR, "/");
 
+        let metadata = fs::metadata(&destination_path)
+            .await
+            .map_err(map_io_error)?;
+        let modified_ts = metadata.modified().ok().map(unix_timestamp).unwrap_or(0);
+        let entry_info = EntryInfo::new(
+            relative_str.clone(),
+            safe_name.clone(),
+            parent_relative_path(&relative_str),
+            false,
+            total_bytes,
+            mime_type.clone(),
+            modified_ts,
+        );
+        state
+            .catalog
+            .sync_entry(entry_info)
+            .await
+            .map_err(|err| AppError::Internal(err.to_string()))?;
+
         let base_url = build_base_url(&headers);
 
         saved_file = Some(UploadResponse {
@@ -216,6 +238,8 @@ pub(crate) async fn handle_upload(
         path,
         client_user_agent(&headers)
     );
+
+    let _ = state.catalog_events.try_send(CatalogCommand::RefreshAll);
 
     let payload = serde_json::json!({
         "status": "success",
@@ -390,6 +414,25 @@ pub(crate) async fn handle_upload_stream(
         download: format!("{base_url}{relative_str}"),
     };
 
+    let metadata = fs::metadata(&destination_path)
+        .await
+        .map_err(map_io_error)?;
+    let modified_ts = metadata.modified().ok().map(unix_timestamp).unwrap_or(0);
+    let entry_info = EntryInfo::new(
+        relative_str.clone(),
+        saved.name.clone(),
+        parent_relative_path(&relative_str),
+        false,
+        total_bytes,
+        saved.mime_type.clone(),
+        modified_ts,
+    );
+    state
+        .catalog
+        .sync_entry(entry_info)
+        .await
+        .map_err(|err| AppError::Internal(err.to_string()))?;
+
     tracing::info!(
         "[uploading] {} - {} - {} - {}",
         client_ip(&headers),
@@ -397,6 +440,8 @@ pub(crate) async fn handle_upload_stream(
         saved.path,
         client_user_agent(&headers)
     );
+
+    let _ = state.catalog_events.try_send(CatalogCommand::RefreshAll);
 
     let payload = serde_json::json!({
         "status": "success",

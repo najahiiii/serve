@@ -22,4 +22,8 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 html-escape = "0.2"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 http-body-util = { version = "0.1", default-features = false }
+tokio-rusqlite = "0.5"
+rusqlite = { version = "0.30", features = ["bundled"] }
+walkdir = "2"
+ulid = "1"
 rand = "0.8"

@@ -15,6 +15,8 @@ pub struct ListResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct ListEntry {
+    #[serde(default)]
+    pub id: Option<String>,
     pub name: String,
     pub size: String,
     #[serde(default)]
@@ -30,6 +32,8 @@ pub struct ListEntry {
 struct TableEntry {
     #[tabled(rename = "#")]
     index: usize,
+    #[tabled(rename = "ID")]
+    id: String,
     #[tabled(rename = "Name")]
     name: String,
     #[tabled(rename = "Size")]
@@ -77,6 +81,7 @@ pub fn list(host: &str, path: &str) -> Result<()> {
         .enumerate()
         .map(|(idx, entry)| TableEntry {
             index: idx + 1,
+            id: entry.id.clone().unwrap_or_else(|| "-".to_string()),
             name: entry.name,
             size: entry.size,
             mime: entry.mime_type,

@@ -13,11 +13,13 @@ use tokio_util::io::ReaderStream;
 use std::io;
 use std::path::PathBuf;
 
+use crate::catalog::EntryInfo;
 use crate::http_utils::{build_base_url, client_ip, client_user_agent, host_header};
 use crate::map_io_error;
 use crate::template;
 use crate::utils::{
-    encode_link, format_modified_time, format_size, is_blacklisted, resolve_within_root,
+    encode_link, format_modified_time, format_size, is_blacklisted, parent_relative_path,
+    relative_path_string, resolve_within_root, unix_timestamp,
 };
 use crate::{AppError, AppState, NOT_FOUND_MESSAGE, POWERED_BY, STREAM_BUFFER_BYTES};
 
@@ -65,6 +67,39 @@ async fn serve_path(
         Ok(meta) => meta,
         Err(err) => return Err(map_io_error(err)),
     };
+
+    let relative_path = relative_path_string(&state.canonical_root, &full_path)
+        .unwrap_or_else(|| requested_path.trim_matches('/').to_string());
+    let parent_path = parent_relative_path(&relative_path);
+    let name = full_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| relative_path.clone());
+    let mime_type = if metadata.is_dir() {
+        "inode/directory".to_string()
+    } else {
+        MimeGuess::from_path(&full_path)
+            .first_raw()
+            .unwrap_or("application/octet-stream")
+            .to_string()
+    };
+    let modified_ts = metadata.modified().ok().map(unix_timestamp).unwrap_or(0);
+    let size_bytes = if metadata.is_dir() { 0 } else { metadata.len() };
+    let entry_info = EntryInfo::new(
+        relative_path.clone(),
+        name,
+        parent_path,
+        metadata.is_dir(),
+        size_bytes,
+        mime_type.clone(),
+        modified_ts,
+    );
+    state
+        .catalog
+        .sync_entry(entry_info)
+        .await
+        .map_err(|err| AppError::Internal(err.to_string()))?;
 
     if metadata.is_dir() {
         render_directory(&state, &headers, requested_path, full_path).await
@@ -123,6 +158,10 @@ async fn render_directory(
             }
         };
         let is_dir = child_metadata.is_dir();
+        let relative_path = match relative_path_string(&state.canonical_root, &child_path) {
+            Some(path) => path,
+            None => continue,
+        };
         let display_name = if is_dir {
             format!("{}/", file_name)
         } else {
@@ -136,6 +175,7 @@ async fn render_directory(
         } else {
             format_size(size_bytes)
         };
+        let modified_epoch = unix_timestamp(modified);
         let modified_local: chrono::DateTime<Local> = modified.into();
         let modified_display = format_modified_time(modified_local);
         let mime_type = if is_dir {
@@ -146,6 +186,21 @@ async fn render_directory(
                 .unwrap_or("application/octet-stream")
                 .to_string()
         };
+        let parent_path = parent_relative_path(&relative_path);
+        let entry_info = EntryInfo::new(
+            relative_path.clone(),
+            file_name.clone(),
+            parent_path,
+            is_dir,
+            size_bytes,
+            mime_type.clone(),
+            modified_epoch,
+        );
+        let entry_id = state
+            .catalog
+            .sync_entry(entry_info)
+            .await
+            .map_err(|err| AppError::Internal(err.to_string()))?;
 
         entries.push(DirectoryEntry {
             name: file_name,
@@ -156,6 +211,7 @@ async fn render_directory(
             modified_display,
             is_dir,
             mime_type,
+            id: entry_id,
         });
     }
 
@@ -176,6 +232,7 @@ async fn render_directory(
                 let absolute = format!("{}{}", base_trimmed, entry.relative_url);
                 serde_json::json!({
                     "index": idx + 1,
+                    "id": entry.id,
                     "name": entry.name,
                     "size": entry.size_display,
                     "size_bytes": entry.size_bytes,
@@ -481,4 +538,5 @@ struct DirectoryEntry {
     modified_display: String,
     is_dir: bool,
     mime_type: String,
+    id: String,
 }

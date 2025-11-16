@@ -152,6 +152,10 @@ impl Config {
             root_source,
         })
     }
+
+    pub fn storage_dir(&self) -> PathBuf {
+        self.config_dir.clone().unwrap_or_else(default_config_dir)
+    }
 }
 
 struct DefaultValues {
@@ -222,6 +226,28 @@ fn resolve_config_candidates(config_path: Option<&Path>) -> Result<Vec<PathBuf>,
     }
 
     Ok(candidates)
+}
+
+pub fn default_config_dir() -> PathBuf {
+    if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
+        if !xdg.trim().is_empty() {
+            return PathBuf::from(xdg).join("serve");
+        }
+    }
+
+    if let Ok(home) = env::var("HOME") {
+        if !home.trim().is_empty() {
+            return PathBuf::from(&home).join(".config").join("serve");
+        }
+    }
+
+    if let Ok(home) = env::var("USERPROFILE") {
+        if !home.trim().is_empty() {
+            return PathBuf::from(home).join(".config").join("serve");
+        }
+    }
+
+    PathBuf::from(".serve")
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,8 +1,10 @@
 use chrono::{DateTime, Local};
+use pathdiff::diff_paths;
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const FRAGMENT: &AsciiSet = &CONTROLS
     .add(b' ')
@@ -117,4 +119,43 @@ pub fn is_blacklisted(full_path: &Path, root: &Path, blacklisted: &HashSet<Strin
     }
 
     false
+}
+
+pub fn relative_path_string(root: &Path, target: &Path) -> Option<String> {
+    let relative = diff_paths(target, root)?;
+    if relative.components().next().is_none() {
+        return Some(String::new());
+    }
+
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::CurDir => continue,
+            Component::Normal(segment) => {
+                parts.push(segment.to_string_lossy().to_string());
+            }
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+
+    Some(parts.join("/"))
+}
+
+pub fn parent_relative_path(path: &str) -> Option<String> {
+    let trimmed = path.trim_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some((parent, _)) = trimmed.rsplit_once('/') {
+        Some(parent.to_string())
+    } else {
+        Some(String::new())
+    }
+}
+
+pub fn unix_timestamp(time: SystemTime) -> i64 {
+    time.duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::from_secs(0))
+        .as_secs() as i64
 }
