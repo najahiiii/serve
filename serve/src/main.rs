@@ -13,7 +13,7 @@ use axum::{
     routing::{get, post, put},
 };
 use clap::{Args, Parser, Subcommand};
-use config::Config;
+use config::{Config, RootSource};
 use std::{env, fmt, io, net::SocketAddr, path::PathBuf, sync::Arc};
 use tower::ServiceBuilder;
 use tower_http::{
@@ -119,12 +119,25 @@ fn effective_config(args: &RunArgs) -> Result<(Config, PathBuf), AppError> {
     }
     if let Some(root) = args.root.clone() {
         config.root_override = Some(root);
+        config.root_source = RootSource::Cli;
     }
 
-    let base_root = config
-        .root_override
-        .clone()
-        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let base_root = match config.root_override.clone() {
+        Some(root) if root.is_absolute() => root,
+        Some(root) => {
+            let base_dir = match config.root_source {
+                RootSource::ConfigFile => config
+                    .config_dir
+                    .clone()
+                    .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+                RootSource::Cli | RootSource::EnvVar | RootSource::Default => {
+                    env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                }
+            };
+            base_dir.join(root)
+        }
+        None => env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    };
     let canonical_root = base_root
         .canonicalize()
         .map_err(|_| AppError::Internal("Failed to resolve root directory".to_string()))?;
@@ -202,9 +215,7 @@ async fn run_server(args: RunArgs) -> Result<(), AppError> {
         AppError::Config(format!("Failed to bind to {addr}: {err}"))
     })?;
 
-    axum::serve(listener, router)
-        .await
-        .map_err(|err| {
+    axum::serve(listener, router).await.map_err(|err| {
         error!("Server error: {}", err);
         AppError::Internal("Server error".to_string())
     })

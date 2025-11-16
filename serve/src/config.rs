@@ -14,6 +14,16 @@ pub struct Config {
     pub blacklisted_files: HashSet<String>,
     pub allowed_extensions: HashSet<String>,
     pub root_override: Option<PathBuf>,
+    pub config_dir: Option<PathBuf>,
+    pub root_source: RootSource,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootSource {
+    Default,
+    ConfigFile,
+    EnvVar,
+    Cli,
 }
 
 impl Config {
@@ -26,6 +36,8 @@ impl Config {
         let mut blacklisted_files = defaults.blacklisted_files;
         let mut allowed_extensions = defaults.allowed_extensions;
         let mut root_override: Option<PathBuf> = None;
+        let mut config_dir: Option<PathBuf> = None;
+        let mut root_source = RootSource::Default;
 
         let candidates = resolve_config_candidates(config_path)?;
 
@@ -70,10 +82,12 @@ impl Config {
 
                 if let Some(root) = parsed.root {
                     if !root.trim().is_empty() {
-                        root_override = Some(PathBuf::from(root));
+                        root_override = Some(PathBuf::from(&root));
+                        root_source = RootSource::ConfigFile;
                     }
                 }
 
+                config_dir = candidate.parent().map(|p| p.to_path_buf());
                 break;
             }
         }
@@ -123,6 +137,7 @@ impl Config {
         if let Ok(value) = env::var("SERVE_ROOT") {
             if !value.trim().is_empty() {
                 root_override = Some(PathBuf::from(value));
+                root_source = RootSource::EnvVar;
             }
         }
 
@@ -133,6 +148,8 @@ impl Config {
             blacklisted_files,
             allowed_extensions,
             root_override,
+            config_dir,
+            root_source,
         })
     }
 }
