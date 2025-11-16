@@ -241,7 +241,8 @@ async fn run_server(args: RunArgs) -> Result<(), AppError> {
 
     let router = Router::new()
         .route("/", get(browse::get_root))
-        .route("/*path", get(browse::get_path))
+        .route("/download", get(browse::download_by_id))
+        .route("/list", get(browse::list_by_id))
         .route("/upload", post(uploads::handle_upload))
         .route(
             "/upload-stream",

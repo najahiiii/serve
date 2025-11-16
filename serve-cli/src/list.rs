@@ -1,5 +1,5 @@
 use crate::constants::CLIENT_HEADER_VALUE;
-use crate::http::{build_client, normalize_url, parse_json};
+use crate::http::{build_client, build_endpoint_url, parse_json};
 use anyhow::{Context, Result};
 use reqwest::header::ACCEPT;
 use serde::Deserialize;
@@ -17,6 +17,8 @@ pub struct ListResponse {
 pub struct ListEntry {
     #[serde(default)]
     pub id: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
     pub name: String,
     pub size: String,
     #[serde(default)]
@@ -26,6 +28,10 @@ pub struct ListEntry {
     pub is_dir: bool,
     #[serde(default)]
     pub mime_type: String,
+    #[serde(default)]
+    pub browse_url: Option<String>,
+    #[serde(default)]
+    pub download_url: Option<String>,
 }
 
 #[derive(Tabled)]
@@ -34,6 +40,8 @@ struct TableEntry {
     index: usize,
     #[tabled(rename = "ID")]
     id: String,
+    #[tabled(rename = "Path")]
+    path: String,
     #[tabled(rename = "Name")]
     name: String,
     #[tabled(rename = "Size")]
@@ -48,9 +56,14 @@ struct TableEntry {
     url: String,
 }
 
-pub fn list(host: &str, path: &str) -> Result<()> {
+pub fn list(host: &str, id: &str) -> Result<()> {
     let client = build_client()?;
-    let url = normalize_url(host, path)?;
+    let mut url = build_endpoint_url(host, "/list")?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.clear();
+        pairs.append_pair("id", id);
+    }
 
     let response = client
         .get(url.clone())
@@ -82,6 +95,7 @@ pub fn list(host: &str, path: &str) -> Result<()> {
         .map(|(idx, entry)| TableEntry {
             index: idx + 1,
             id: entry.id.clone().unwrap_or_else(|| "-".to_string()),
+            path: entry.path.clone().unwrap_or_else(|| "-".to_string()),
             name: entry.name,
             size: entry.size,
             mime: entry.mime_type,
@@ -91,7 +105,11 @@ pub fn list(host: &str, path: &str) -> Result<()> {
             } else {
                 "file".into()
             },
-            url: entry.url,
+            url: entry
+                .download_url
+                .clone()
+                .or(entry.browse_url.clone())
+                .unwrap_or(entry.url),
         })
         .collect();
 

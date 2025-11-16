@@ -1,5 +1,5 @@
 use crate::constants::CLIENT_HEADER_VALUE;
-use crate::http::{build_client, normalize_url, parse_json};
+use crate::http::{build_client, build_endpoint_url, parse_json};
 use crate::progress::{create_progress_bar, finish_progress};
 use crate::retry::retry;
 use anyhow::{Context, Result};
@@ -15,11 +15,14 @@ use indicatif::ProgressBar;
 #[derive(Deserialize, Debug)]
 pub struct UploadResponse {
     pub status: String,
+    pub id: String,
+    pub dir_id: String,
     pub name: String,
-    pub size: String,
-    pub path: String,
-    pub view: String,
-    pub download: String,
+    pub size_bytes: u64,
+    pub mime_type: String,
+    pub created_date: String,
+    pub download_url: String,
+    pub list_url: String,
     #[serde(default)]
     pub powered_by: String,
 }
@@ -28,7 +31,7 @@ pub fn upload(
     host: &str,
     file_path: &str,
     token: &str,
-    upload_path: Option<&str>,
+    parent_id: &str,
     allow_no_ext: bool,
     stream: bool,
     max_retries: usize,
@@ -54,7 +57,7 @@ pub fn upload(
             host,
             file_path,
             token,
-            upload_path,
+            parent_id,
             allow_no_ext,
             stream,
             file_size,
@@ -68,7 +71,7 @@ fn perform_upload_attempt(
     host: &str,
     file_path: &str,
     token: &str,
-    upload_path: Option<&str>,
+    parent_id: &str,
     allow_no_ext: bool,
     stream: bool,
     file_size: u64,
@@ -77,13 +80,11 @@ fn perform_upload_attempt(
     let progress = create_progress_bar(Some(file_size), file_name);
 
     let response = if stream {
-        let mut url = normalize_url(host, "upload-stream")?;
+        let mut url = build_endpoint_url(host, "/upload-stream")?;
         {
             let mut pairs = url.query_pairs_mut();
             pairs.append_pair("name", file_name);
-            if let Some(path) = upload_path {
-                pairs.append_pair("path", path);
-            }
+            pairs.append_pair("dir", parent_id);
             if allow_no_ext {
                 pairs.append_pair("allow_no_ext", "true");
             }
@@ -99,9 +100,6 @@ fn perform_upload_attempt(
             .header(header::CONTENT_TYPE, "application/octet-stream")
             .body(Body::sized(reader, file_size));
 
-        if let Some(path) = upload_path {
-            request = request.header("X-Upload-Path", path);
-        }
         request = request.header("X-Upload-Filename", file_name);
         if allow_no_ext {
             request = request.header("X-Allow-No-Ext", "true");
@@ -109,29 +107,28 @@ fn perform_upload_attempt(
 
         execute_request(request, &progress)?
     } else {
-        let url = normalize_url(host, "upload")?;
+        let mut url = build_endpoint_url(host, "/upload")?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.append_pair("dir", parent_id);
+            if allow_no_ext {
+                pairs.append_pair("allow_no_ext", "true");
+            }
+        }
         let file =
             File::open(file_path).with_context(|| format!("failed to open file {}", file_path))?;
         let reader = ProgressReader::new(file, progress.clone());
 
-        let mut form = multipart::Form::new().part(
+        let form = multipart::Form::new().part(
             "file",
             multipart::Part::reader_with_length(reader, file_size).file_name(file_name.to_string()),
         );
-
-        if let Some(path) = upload_path {
-            form = form.text("path", path.to_string());
-        }
 
         let mut request = client
             .post(url)
             .header("X-Serve-Client", CLIENT_HEADER_VALUE)
             .header("X-Upload-Token", token)
             .multipart(form);
-
-        if let Some(path) = upload_path {
-            request = request.header("X-Upload-Path", path);
-        }
         if allow_no_ext {
             request = request.header("X-Allow-No-Ext", "true");
         }
@@ -147,10 +144,13 @@ fn perform_upload_attempt(
     }
 
     println!("Uploaded: {}", data.name);
-    println!("Size: {} bytes", data.size);
-    println!("Path: {}", data.path);
-    println!("Download: {}", data.download);
-    println!("View: {}", data.view);
+    println!("Size: {} bytes", data.size_bytes);
+    println!("File ID: {}", data.id);
+    println!("Parent ID: {}", data.dir_id);
+    println!("MIME: {}", data.mime_type);
+    println!("Download: {}", data.download_url);
+    println!("List: {}", data.list_url);
+    println!("Created: {}", data.created_date);
     if !data.powered_by.is_empty() {
         println!("Server: {}", data.powered_by);
     }

@@ -1,6 +1,6 @@
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::extract::{Query, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::Response;
 use chrono::{Datelike, Local};
 use html_escape::encode_text;
@@ -13,7 +13,7 @@ use tokio_util::io::ReaderStream;
 use std::io;
 use std::path::PathBuf;
 
-use crate::catalog::EntryInfo;
+use crate::catalog::{CatalogEntry, EntryInfo};
 use crate::http_utils::{build_base_url, client_ip, client_user_agent, host_header};
 use crate::map_io_error;
 use crate::template;
@@ -29,21 +29,26 @@ pub(crate) struct ViewQuery {
     pub(crate) view: Option<bool>,
 }
 
-pub(crate) async fn get_root(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(query): Query<ViewQuery>,
-) -> Result<Response, AppError> {
-    serve_path(state, headers, "", query).await
+#[derive(Debug, Deserialize)]
+pub(crate) struct DownloadIdQuery {
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) view: Option<bool>,
 }
 
-pub(crate) async fn get_path(
-    State(state): State<AppState>,
-    Path(path): Path<String>,
-    headers: HeaderMap,
-    Query(query): Query<ViewQuery>,
-) -> Result<Response, AppError> {
-    serve_path(state, headers, &path, query).await
+#[derive(Debug, Deserialize)]
+pub(crate) struct ListIdQuery {
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) view: Option<bool>,
+}
+
+pub(crate) async fn get_root() -> Result<Response, AppError> {
+    Response::builder()
+        .status(StatusCode::FOUND)
+        .header(header::LOCATION, "/list?id=root")
+        .body(Body::empty())
+        .map_err(|err| AppError::Internal(err.to_string()))
 }
 
 async fn serve_path(
@@ -117,6 +122,89 @@ async fn serve_path(
     }
 }
 
+async fn resolve_entry_by_id(state: &AppState, raw_id: &str) -> Result<CatalogEntry, AppError> {
+    let id = raw_id.trim();
+    if id.is_empty() {
+        return Err(AppError::BadRequest("Missing id parameter".to_string()));
+    }
+    if id.eq_ignore_ascii_case("root") {
+        return Ok(CatalogEntry {
+            relative_path: String::new(),
+            is_dir: true,
+        });
+    }
+    state
+        .catalog
+        .resolve_id(id)
+        .await
+        .map_err(|err| AppError::Internal(err.to_string()))?
+        .ok_or_else(|| AppError::NotFound(NOT_FOUND_MESSAGE.to_string()))
+}
+
+async fn serve_entry_by_relative_path(
+    state: AppState,
+    headers: HeaderMap,
+    relative_path: &str,
+    query: ViewQuery,
+) -> Result<Response, AppError> {
+    let requested_path = relative_path.trim_matches('/');
+    serve_path(state, headers, requested_path, query).await
+}
+
+pub(crate) async fn download_by_id(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<DownloadIdQuery>,
+) -> Result<Response, AppError> {
+    let id = query.id.trim();
+    if id.is_empty() {
+        return Err(AppError::BadRequest("Missing id parameter".to_string()));
+    }
+
+    let entry = resolve_entry_by_id(&state, id).await?;
+
+    if entry.is_dir {
+        return Err(AppError::BadRequest(
+            "ID refers to a directory; download directories via path".to_string(),
+        ));
+    }
+
+    serve_entry_by_relative_path(
+        state,
+        headers,
+        &entry.relative_path,
+        ViewQuery { view: query.view },
+    )
+    .await
+}
+
+pub(crate) async fn list_by_id(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ListIdQuery>,
+) -> Result<Response, AppError> {
+    let trimmed = query.id.trim().to_string();
+    let entry = resolve_entry_by_id(&state, &trimmed).await?;
+    if !entry.is_dir {
+        let mut location = format!("/download?id={}", trimmed);
+        if query.view.unwrap_or(false) {
+            location.push_str("&view=true");
+        }
+        return Response::builder()
+            .status(StatusCode::PERMANENT_REDIRECT)
+            .header(header::LOCATION, location)
+            .body(Body::empty())
+            .map_err(|err| AppError::Internal(err.to_string()));
+    }
+    serve_entry_by_relative_path(
+        state,
+        headers,
+        &entry.relative_path,
+        ViewQuery { view: query.view },
+    )
+    .await
+}
+
 async fn render_directory(
     state: &AppState,
     headers: &HeaderMap,
@@ -167,8 +255,6 @@ async fn render_directory(
         } else {
             file_name.clone()
         };
-        let link = entry_link(requested_path, &file_name);
-        let relative_url = encode_link(&link);
         let size_bytes = if is_dir { 0 } else { child_metadata.len() };
         let size_display = if is_dir {
             "-".to_string()
@@ -202,6 +288,14 @@ async fn render_directory(
             .await
             .map_err(|err| AppError::Internal(err.to_string()))?;
 
+        let browse_link = format!("/list?id={}", entry_id);
+        let download_link = format!("/download?id={}", entry_id);
+        let relative_url = if is_dir {
+            browse_link.clone()
+        } else {
+            download_link.clone()
+        };
+
         entries.push(DirectoryEntry {
             name: file_name,
             display_name,
@@ -212,6 +306,9 @@ async fn render_directory(
             is_dir,
             mime_type,
             id: entry_id,
+            relative_path,
+            browse_link,
+            download_link,
         });
     }
 
@@ -229,7 +326,13 @@ async fn render_directory(
             .iter()
             .enumerate()
             .map(|(idx, entry)| {
-                let absolute = format!("{}{}", base_trimmed, entry.relative_url);
+                let browse_absolute = format!("{}{}", base_trimmed, entry.browse_link);
+                let download_absolute = format!("{}{}", base_trimmed, entry.download_link);
+                let absolute = if entry.is_dir {
+                    browse_absolute.clone()
+                } else {
+                    download_absolute.clone()
+                };
                 serde_json::json!({
                     "index": idx + 1,
                     "id": entry.id,
@@ -238,6 +341,9 @@ async fn render_directory(
                     "size_bytes": entry.size_bytes,
                     "modified": entry.modified_display,
                     "url": absolute,
+                    "path": entry.relative_path,
+                    "browse_url": browse_absolute,
+                    "download_url": download_absolute,
                     "is_dir": entry.is_dir,
                     "mime_type": entry.mime_type,
                 })
@@ -501,15 +607,6 @@ fn parent_link(requested_path: &str) -> Option<String> {
     }
 }
 
-fn entry_link(base_path: &str, name: &str) -> String {
-    let base = base_path.trim_matches('/');
-    if base.is_empty() {
-        format!("/{name}")
-    } else {
-        format!("/{base}/{name}")
-    }
-}
-
 fn directory_label(requested_path: &str, host: &str) -> String {
     if requested_path.trim().is_empty() {
         host.to_string()
@@ -539,4 +636,7 @@ struct DirectoryEntry {
     is_dir: bool,
     mime_type: String,
     id: String,
+    relative_path: String,
+    browse_link: String,
+    download_link: String,
 }

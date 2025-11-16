@@ -1,6 +1,6 @@
 use crate::cleanup::{TempCleanupGuard, track_temp_file, untrack_temp_file};
 use crate::constants::CLIENT_HEADER_VALUE;
-use crate::http::{build_client, normalize_url};
+use crate::http::{build_client, build_endpoint_url};
 use crate::list::ListResponse;
 use crate::progress::{
     self, ActiveConnectionGuard, PARTIAL_STATE_UPDATE_THRESHOLD, create_progress_bar,
@@ -38,34 +38,42 @@ struct DownloadOutcome {
 
 const MAX_CHUNK_SIZE: u64 = 256 * 1024 * 1024;
 
+fn build_download_url(host: &str, id: &str) -> Result<Url> {
+    let mut url = build_endpoint_url(host, "/download")?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.clear();
+        pairs.append_pair("id", id);
+    }
+    Ok(url)
+}
+
 pub fn download(
     host: &str,
-    remote_path: &str,
+    id: &str,
     out_override: Option<String>,
     recursive: bool,
     connections: u8,
     existing_strategy: ExistingFileStrategy,
     max_retries: usize,
 ) -> Result<()> {
-    let trimmed = remote_path.trim();
+    let trimmed = id.trim();
     if trimmed.is_empty() {
-        anyhow::bail!("remote path is required");
+        anyhow::bail!("id value cannot be empty");
     }
 
     let client = build_client()?;
-    let remote = ensure_leading_slash(trimmed);
-
-    if let Some(listing) = fetch_listing_optional(&client, host, &remote)? {
+    if let Some(listing) = fetch_listing_optional(&client, host, trimmed)? {
         if !recursive {
             anyhow::bail!(
-                "{} is a directory. Pass --recursive to download it.",
-                remote
+                "ID {} is a directory. Pass --recursive to download it.",
+                trimmed
             );
         }
 
         let mut base_local = match out_override {
             Some(path) => Path::new(&path).to_path_buf(),
-            None => derive_directory_name(&remote)?,
+            None => derive_directory_name(&listing.path)?,
         };
 
         match existing_strategy {
@@ -86,11 +94,9 @@ pub fn download(
             ExistingFileStrategy::Overwrite => {}
         }
 
-        let remote_dir = ensure_trailing_slash(&remote);
         download_directory_recursive(
             &client,
             host,
-            &remote_dir,
             &base_local,
             listing,
             connections,
@@ -101,15 +107,14 @@ pub fn download(
         return Ok(());
     }
 
-    let output_path = match out_override {
-        Some(path) => Path::new(&path).to_path_buf(),
-        None => derive_file_name(&remote),
-    };
-
-    let outcome = download_file(
+    let output_path = out_override
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("--out is required when downloading a file by id"))?;
+    let download_url = build_download_url(host, trimmed)?;
+    let outcome = download_file_with_url(
         &client,
-        host,
-        &remote,
+        download_url,
+        &format!("id:{trimmed}"),
         &output_path,
         connections,
         existing_strategy,
@@ -140,10 +145,10 @@ fn finalize_empty_file(output: &Path) -> Result<()> {
     Ok(())
 }
 
-fn download_file(
+fn download_file_with_url(
     client: &Client,
-    host: &str,
-    remote: &str,
+    url: Url,
+    remote_label: &str,
     output: &Path,
     connections: u8,
     existing_strategy: ExistingFileStrategy,
@@ -152,8 +157,8 @@ fn download_file(
     retry("download", max_retries, || {
         download_file_once(
             client,
-            host,
-            remote,
+            url.clone(),
+            remote_label,
             output,
             connections,
             existing_strategy,
@@ -164,14 +169,13 @@ fn download_file(
 
 fn download_file_once(
     client: &Client,
-    host: &str,
-    remote: &str,
+    url: Url,
+    remote_label: &str,
     output: &Path,
     connections: u8,
     existing_strategy: ExistingFileStrategy,
     max_retries: usize,
 ) -> Result<DownloadOutcome> {
-    let url = normalize_url(host, remote)?;
     let probe = probe_file(client, &url)?;
 
     let output_path = match existing_strategy {
@@ -235,7 +239,7 @@ fn download_file_once(
 
     if matches!(probe.length, Some(0)) {
         finalize_empty_file(&output_path)?;
-        println!("Downloaded 0 bytes from {}", remote);
+        println!("Downloaded 0 bytes from {}", remote_label);
         cleanup_guard.disarm();
         return Ok(DownloadOutcome {
             path: output_path,
@@ -265,9 +269,9 @@ fn download_file_once(
     cleanup_guard.disarm();
 
     if let Some(total) = probe.length {
-        println!("Downloaded {} bytes from {}", total, remote);
+        println!("Downloaded {} bytes from {}", total, remote_label);
     } else {
-        println!("Downloaded {} bytes from {}", downloaded_len, remote);
+        println!("Downloaded {} bytes from {}", downloaded_len, remote_label);
     }
     Ok(DownloadOutcome {
         path: output_path,
@@ -837,7 +841,6 @@ fn finalize_temp_file(temp_path: &Path, output: &Path, total: Option<u64>) -> Re
 fn download_directory_recursive(
     client: &Client,
     host: &str,
-    remote_dir: &str,
     local_dir: &Path,
     listing: ListResponse,
     connections: u8,
@@ -848,7 +851,10 @@ fn download_directory_recursive(
         .with_context(|| format!("failed to create directory {}", local_dir.display()))?;
 
     for entry in listing.entries {
-        let mut child_remote = format!("{}{}", remote_dir, entry.name);
+        let entry_id = entry
+            .id
+            .clone()
+            .ok_or_else(|| anyhow!("entry {} missing id", entry.name))?;
         let child_local = local_dir.join(&entry.name);
 
         if entry.is_dir {
@@ -866,13 +872,11 @@ fn download_directory_recursive(
                 continue;
             }
 
-            child_remote = ensure_trailing_slash(&child_remote);
-            let child_listing = fetch_listing_optional(client, host, &child_remote)?
-                .ok_or_else(|| anyhow::anyhow!("failed to list directory {}", child_remote))?;
+            let child_listing = fetch_listing_optional(client, host, &entry_id)?
+                .ok_or_else(|| anyhow!("failed to list directory {}", entry.name))?;
             download_directory_recursive(
                 client,
                 host,
-                &child_remote,
                 &target_local,
                 child_listing,
                 connections,
@@ -880,10 +884,11 @@ fn download_directory_recursive(
                 max_retries,
             )?;
         } else {
-            download_file(
+            let download_url = build_download_url(host, &entry_id)?;
+            let _ = download_file_with_url(
                 client,
-                host,
-                &child_remote,
+                download_url,
+                &entry.name,
                 &child_local,
                 connections,
                 existing_strategy,
@@ -895,11 +900,7 @@ fn download_directory_recursive(
     Ok(())
 }
 
-fn fetch_listing_optional(
-    client: &Client,
-    host: &str,
-    remote: &str,
-) -> Result<Option<ListResponse>> {
+fn fetch_listing_optional(client: &Client, host: &str, id: &str) -> Result<Option<ListResponse>> {
     #[derive(Debug)]
     enum ListingProbe {
         Listing(ListResponse),
@@ -907,8 +908,13 @@ fn fetch_listing_optional(
         NotDirectory,
     }
 
-    fn try_fetch(client: &Client, host: &str, path: &str) -> Result<ListingProbe> {
-        let url = normalize_url(host, path)?;
+    fn try_fetch(client: &Client, host: &str, id: &str) -> Result<ListingProbe> {
+        let mut url = build_endpoint_url(host, "/list")?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.clear();
+            pairs.append_pair("id", id);
+        }
         let response = client
             .get(url.clone())
             .header("X-Serve-Client", CLIENT_HEADER_VALUE)
@@ -950,34 +956,9 @@ fn fetch_listing_optional(
         }
     }
 
-    match try_fetch(client, host, remote)? {
+    match try_fetch(client, host, id)? {
         ListingProbe::Listing(listing) => Ok(Some(listing)),
         ListingProbe::NotDirectory | ListingProbe::NotFound => Ok(None),
-    }
-}
-
-fn ensure_leading_slash(path: &str) -> String {
-    if path.starts_with('/') {
-        path.to_string()
-    } else {
-        format!("/{}", path)
-    }
-}
-
-fn ensure_trailing_slash(path: &str) -> String {
-    if path.ends_with('/') {
-        path.to_string()
-    } else {
-        format!("{}/", path.trim_end_matches('/'))
-    }
-}
-
-fn derive_file_name(remote: &str) -> PathBuf {
-    let clean = remote.trim_end_matches('/');
-    if let Some(name) = Path::new(clean).file_name().and_then(|s| s.to_str()) {
-        PathBuf::from(name)
-    } else {
-        PathBuf::from("download")
     }
 }
 

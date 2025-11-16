@@ -10,7 +10,8 @@ const CONFIG_FILE_NAME: &str = "serve-cli.toml";
 pub struct AppConfig {
     pub host: Option<String>,
     pub token: Option<String>,
-    pub upload_path: Option<String>,
+    #[serde(default, alias = "upload_path")]
+    pub upload_parent_id: Option<String>,
     pub allow_no_ext: Option<bool>,
     pub max_retries: Option<u32>,
 }

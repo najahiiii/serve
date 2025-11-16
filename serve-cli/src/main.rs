@@ -59,9 +59,9 @@ enum Command {
     Download {
         #[arg(long)]
         host: Option<String>,
-        /// Remote file path (e.g. /dir/archive.tar)
+        /// Catalog ID to download
         #[arg(long)]
-        path: String,
+        id: String,
         /// Output file (defaults to last path segment)
         #[arg(long)]
         out: Option<String>,
@@ -86,8 +86,8 @@ enum Command {
         file: String,
         #[arg(long)]
         token: Option<String>,
-        #[arg(long)]
-        upload_path: Option<String>,
+        #[arg(long, help = "Target directory ID (default root)")]
+        parent_id: Option<String>,
         #[arg(long, default_value_t = false)]
         allow_no_ext: bool,
         #[arg(long, default_value_t = false)]
@@ -98,9 +98,9 @@ enum Command {
         /// Base host URL (e.g. https://files.example.com)
         #[arg(long)]
         host: Option<String>,
-        /// Path to list (e.g. / or dir/subdir)
-        #[arg(long, default_value = "/")]
-        path: String,
+        /// Catalog ID to list (use "root" for the top-level)
+        #[arg(long, default_value = "root")]
+        id: String,
     },
     /// Interactive configuration helper
     Setup,
@@ -124,7 +124,7 @@ fn main() -> Result<()> {
         Command::Config => show_config(&loaded_config, config.as_deref()),
         Command::Download {
             host,
-            path,
+            id,
             out,
             recursive,
             connections,
@@ -141,7 +141,7 @@ fn main() -> Result<()> {
             };
             download::download(
                 &resolved_host,
-                &path,
+                &id,
                 out,
                 recursive,
                 connections.clamp(1, 16),
@@ -153,27 +153,27 @@ fn main() -> Result<()> {
             host,
             file,
             token,
-            upload_path,
+            parent_id,
             allow_no_ext,
             stream,
         } => {
             let resolved_host = resolve_host(host, &app_config);
             let resolved_token = resolve_token(token, &app_config)?;
-            let resolved_path = resolve_upload_path(upload_path, &app_config);
+            let resolved_parent = resolve_parent_id(parent_id, &app_config);
             let effective_allow = effective_allow_no_ext(allow_no_ext, &app_config);
             upload::upload(
                 &resolved_host,
                 &file,
                 &resolved_token,
-                resolved_path.as_deref(),
+                &resolved_parent,
                 effective_allow,
                 stream,
                 retry_attempts,
             )
         }
-        Command::List { host, path } => {
+        Command::List { host, id } => {
             let resolved_host = resolve_host(host, &app_config);
-            list::list(&resolved_host, &path)
+            list::list(&resolved_host, &id)
         }
         Command::Setup => run_setup(config.as_deref(), &app_config),
         Command::Version => {
@@ -199,8 +199,18 @@ fn resolve_token(token_arg: Option<String>, config: &AppConfig) -> Result<String
     }
 }
 
-fn resolve_upload_path(path_arg: Option<String>, config: &AppConfig) -> Option<String> {
-    path_arg.or_else(|| config.upload_path.clone())
+fn resolve_parent_id(id_arg: Option<String>, config: &AppConfig) -> String {
+    id_arg
+        .or_else(|| config.upload_parent_id.clone())
+        .and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .unwrap_or_else(|| "root".to_string())
 }
 
 fn resolve_retries(retry_arg: Option<usize>, config: &AppConfig) -> usize {
@@ -230,9 +240,9 @@ fn run_setup(path_override: Option<&Path>, current: &AppConfig) -> Result<()> {
     let host_default = current.host.as_deref().unwrap_or(DEFAULT_HOST);
     let host = prompt_with_default("Server base URL", host_default)?;
     let token = prompt_optional("Default upload token", current.token.as_deref())?;
-    let upload_path = prompt_optional(
-        "Default upload path (blank to skip)",
-        current.upload_path.as_deref(),
+    let upload_parent = prompt_optional(
+        "Default upload parent ID (blank for root)",
+        current.upload_parent_id.as_deref(),
     )?;
     let allow_no_ext = prompt_bool(
         "Allow uploads without extension by default",
@@ -246,7 +256,7 @@ fn run_setup(path_override: Option<&Path>, current: &AppConfig) -> Result<()> {
     let mut new_config = AppConfig::default();
     new_config.host = Some(host);
     new_config.token = token;
-    new_config.upload_path = upload_path;
+    new_config.upload_parent_id = upload_parent;
     new_config.allow_no_ext = Some(allow_no_ext);
     new_config.max_retries = max_retries;
 
@@ -346,7 +356,7 @@ fn prompt_optional_u32(prompt: &str, current: Option<u32>) -> Result<Option<u32>
 
 fn show_config(loaded: &LoadedConfig, override_path: Option<&Path>) -> Result<()> {
     let effective_host = resolve_host(None, &loaded.data);
-    let effective_path = resolve_upload_path(None, &loaded.data);
+    let effective_parent = resolve_parent_id(None, &loaded.data);
     let allow = effective_allow_no_ext(false, &loaded.data);
 
     if let Some(path) = override_path {
@@ -377,10 +387,7 @@ fn show_config(loaded: &LoadedConfig, override_path: Option<&Path>) -> Result<()
             .filter(|s| !s.is_empty())
             .unwrap_or("<not set>")
     );
-    println!(
-        "Default path    : {}",
-        effective_path.as_deref().unwrap_or("<not set>")
-    );
+    println!("Default parent  : {}", effective_parent);
     println!("Allow no ext    : {}", allow);
     let retries = resolve_retries(None, &loaded.data);
     let sleep_secs = total_retry_sleep_seconds(retries);

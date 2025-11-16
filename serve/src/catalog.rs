@@ -177,6 +177,27 @@ impl Catalog {
         self.apply_snapshot(entries).await
     }
 
+    pub async fn resolve_id(&self, id: &str) -> Result<Option<CatalogEntry>, CatalogError> {
+        let id = id.to_string();
+        self.conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare("SELECT path, is_dir FROM entries WHERE id = ?1")?;
+                let mut rows = stmt.query([id.as_str()])?;
+                if let Some(row) = rows.next()? {
+                    let path: String = row.get(0)?;
+                    let is_dir: i64 = row.get(1)?;
+                    Ok(Some(CatalogEntry {
+                        relative_path: path,
+                        is_dir: is_dir != 0,
+                    }))
+                } else {
+                    Ok(None)
+                }
+            })
+            .await
+            .map_err(Into::into)
+    }
+
     async fn apply_snapshot(&self, entries: Vec<ScannedEntry>) -> Result<(), CatalogError> {
         let now = current_unix_timestamp();
         self.conn
@@ -354,6 +375,12 @@ fn scan_root(
     }
 
     Ok(entries)
+}
+
+#[derive(Clone)]
+pub struct CatalogEntry {
+    pub relative_path: String,
+    pub is_dir: bool,
 }
 
 #[derive(Clone)]

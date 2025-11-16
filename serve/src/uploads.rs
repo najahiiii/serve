@@ -15,21 +15,19 @@ use tokio::io::AsyncWriteExt;
 use crate::catalog::{CatalogCommand, EntryInfo};
 use crate::http_utils::{build_base_url, client_ip, client_user_agent};
 use crate::map_io_error;
-use crate::utils::{
-    is_allowed_file, parent_relative_path, resolve_within_root, secure_filename, unix_timestamp,
-};
-use crate::{AppError, AppState, POWERED_BY};
+use crate::utils::{is_allowed_file, parent_relative_path, secure_filename, unix_timestamp};
+use crate::{AppError, AppState, NOT_FOUND_MESSAGE, POWERED_BY};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct UploadQuery {
     #[serde(default)]
-    pub(crate) path: Option<String>,
+    pub(crate) dir: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub(crate) struct UploadStreamQuery {
     #[serde(default)]
-    pub(crate) path: Option<String>,
+    pub(crate) dir: Option<String>,
     #[serde(default)]
     pub(crate) name: Option<String>,
     #[serde(default)]
@@ -49,15 +47,8 @@ pub(crate) async fn handle_upload(
         return Err(AppError::Unauthorized("Unauthorized".to_string()));
     }
 
-    let mut target_dir_path = query.path.unwrap_or_default();
-    if let Some(header_path) = headers
-        .get("X-Upload-Path")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        target_dir_path = header_path.to_string();
-    }
+    let dir_id = extract_dir_id(&headers, query.dir);
+    let (target_dir, resolved_dir_id) = resolve_target_directory(&state, dir_id).await?;
 
     let mut saved_file = None;
 
@@ -80,18 +71,6 @@ pub(crate) async fn handle_upload(
                 ));
             }
         };
-
-        if field.name() == Some("path") {
-            let text = field.text().await.map_err(|err| {
-                tracing::error!("Failed to read path field: {}", err);
-                AppError::BadRequest("Invalid directory path".to_string())
-            })?;
-            let trimmed = text.trim();
-            if !trimmed.is_empty() {
-                target_dir_path = trimmed.to_string();
-            }
-            continue;
-        }
 
         if field.name() != Some("file") {
             continue;
@@ -136,26 +115,11 @@ pub(crate) async fn handle_upload(
             AppError::BadRequest("No selected file or file type not allowed".to_string())
         })?;
 
-        let target_dir = if target_dir_path.trim().is_empty() {
-            state.canonical_root.as_ref().clone()
-        } else {
-            resolve_within_root(&state.canonical_root, &target_dir_path)
-                .ok_or_else(|| AppError::BadRequest("Invalid directory path".to_string()))?
-        };
-
-        if !target_dir.starts_with(&*state.canonical_root) {
-            return Err(AppError::BadRequest("Invalid directory path".to_string()));
-        }
-
         fs::create_dir_all(&target_dir)
             .await
             .map_err(map_io_error)?;
 
         let destination_path = target_dir.join(&safe_name);
-
-        if !destination_path.starts_with(&*state.canonical_root) {
-            return Err(AppError::BadRequest("Invalid directory path".to_string()));
-        }
 
         let mut output = fs::File::create(&destination_path)
             .await
@@ -199,22 +163,25 @@ pub(crate) async fn handle_upload(
             mime_type.clone(),
             modified_ts,
         );
-        state
+        let entry_id = state
             .catalog
             .sync_entry(entry_info)
             .await
             .map_err(|err| AppError::Internal(err.to_string()))?;
 
         let base_url = build_base_url(&headers);
+        let (download_url, list_url) = upload_links(&base_url, &entry_id, &resolved_dir_id);
 
         saved_file = Some(UploadResponse {
             name: safe_name,
-            size: total_bytes.to_string(),
+            size_bytes: total_bytes,
             mime_type,
             created_date: Utc::now().to_rfc3339(),
-            path: relative_str.clone(),
-            view: format!("{base_url}{relative_str}?view=true"),
-            download: format!("{base_url}{relative_str}"),
+            id: entry_id,
+            dir_id: resolved_dir_id.clone(),
+            download_url,
+            list_url,
+            relative_path: relative_str.clone(),
         });
 
         break;
@@ -223,19 +190,21 @@ pub(crate) async fn handle_upload(
     let saved = saved_file.ok_or_else(|| AppError::BadRequest("No file to upload".to_string()))?;
     let UploadResponse {
         name,
-        size,
+        size_bytes,
         mime_type,
         created_date,
-        path,
-        view,
-        download,
+        id,
+        dir_id: response_dir_id,
+        download_url,
+        list_url,
+        relative_path,
     } = saved;
 
     tracing::info!(
         "[uploading] {} - {} - {} - {}",
         client_ip(&headers),
         name,
-        path,
+        relative_path,
         client_user_agent(&headers)
     );
 
@@ -244,12 +213,13 @@ pub(crate) async fn handle_upload(
     let payload = serde_json::json!({
         "status": "success",
         "name": name,
-        "size": size,
+        "id": id,
+        "dir_id": response_dir_id,
+        "size_bytes": size_bytes,
         "created_date": created_date,
         "mime_type": mime_type,
-        "path": path,
-        "view": view,
-        "download": download,
+        "download_url": download_url,
+        "list_url": list_url,
         "powered_by": POWERED_BY,
     });
 
@@ -282,20 +252,13 @@ pub(crate) async fn handle_upload_stream(
     }
 
     let UploadStreamQuery {
-        path,
+        dir,
         name,
         allow_no_ext,
     } = query;
 
-    let mut target_dir_path = path.unwrap_or_default();
-    if let Some(header_path) = headers
-        .get("X-Upload-Path")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        target_dir_path = header_path.to_string();
-    }
+    let dir_id = extract_dir_id(&headers, dir);
+    let (target_dir, resolved_dir_id) = resolve_target_directory(&state, dir_id).await?;
 
     let mut file_name = name.unwrap_or_default();
     if file_name.is_empty() {
@@ -338,17 +301,6 @@ pub(crate) async fn handle_upload_stream(
     let safe_name = secure_filename(clean_name).ok_or_else(|| {
         AppError::BadRequest("No selected file or file type not allowed".to_string())
     })?;
-
-    let target_dir = if target_dir_path.trim().is_empty() {
-        state.canonical_root.as_ref().clone()
-    } else {
-        resolve_within_root(&state.canonical_root, &target_dir_path)
-            .ok_or_else(|| AppError::BadRequest("Invalid directory path".to_string()))?
-    };
-
-    if !target_dir.starts_with(&*state.canonical_root) {
-        return Err(AppError::BadRequest("Invalid directory path".to_string()));
-    }
 
     fs::create_dir_all(&target_dir)
         .await
@@ -402,42 +354,45 @@ pub(crate) async fn handle_upload_stream(
         .to_string_lossy()
         .replace(std::path::MAIN_SEPARATOR, "/");
 
-    let base_url = build_base_url(&headers);
-
-    let saved = UploadResponse {
-        name: safe_name,
-        size: total_bytes.to_string(),
-        mime_type,
-        created_date: Utc::now().to_rfc3339(),
-        path: relative_str.clone(),
-        view: format!("{base_url}{relative_str}?view=true"),
-        download: format!("{base_url}{relative_str}"),
-    };
-
     let metadata = fs::metadata(&destination_path)
         .await
         .map_err(map_io_error)?;
     let modified_ts = metadata.modified().ok().map(unix_timestamp).unwrap_or(0);
     let entry_info = EntryInfo::new(
         relative_str.clone(),
-        saved.name.clone(),
+        safe_name.clone(),
         parent_relative_path(&relative_str),
         false,
         total_bytes,
-        saved.mime_type.clone(),
+        mime_type.clone(),
         modified_ts,
     );
-    state
+    let entry_id = state
         .catalog
         .sync_entry(entry_info)
         .await
         .map_err(|err| AppError::Internal(err.to_string()))?;
 
+    let base_url = build_base_url(&headers);
+    let (download_url, list_url) = upload_links(&base_url, &entry_id, &resolved_dir_id);
+
+    let saved = UploadResponse {
+        name: safe_name,
+        size_bytes: total_bytes,
+        mime_type,
+        created_date: Utc::now().to_rfc3339(),
+        id: entry_id,
+        dir_id: resolved_dir_id.clone(),
+        download_url,
+        list_url,
+        relative_path: relative_str.clone(),
+    };
+
     tracing::info!(
         "[uploading] {} - {} - {} - {}",
         client_ip(&headers),
         saved.name,
-        saved.path,
+        saved.relative_path,
         client_user_agent(&headers)
     );
 
@@ -446,12 +401,13 @@ pub(crate) async fn handle_upload_stream(
     let payload = serde_json::json!({
         "status": "success",
         "name": saved.name,
-        "size": saved.size,
+        "id": saved.id,
+        "dir_id": saved.dir_id,
+        "size_bytes": saved.size_bytes,
         "created_date": saved.created_date,
         "mime_type": saved.mime_type,
-        "path": saved.path,
-        "view": saved.view,
-        "download": saved.download,
+        "download_url": saved.download_url,
+        "list_url": saved.list_url,
         "powered_by": POWERED_BY,
     });
 
@@ -480,10 +436,78 @@ fn is_upload_cancelled(err: &MultipartError) -> bool {
 #[derive(Debug)]
 struct UploadResponse {
     name: String,
-    size: String,
+    size_bytes: u64,
     mime_type: String,
     created_date: String,
-    path: String,
-    view: String,
-    download: String,
+    id: String,
+    dir_id: String,
+    download_url: String,
+    list_url: String,
+    relative_path: String,
+}
+
+fn extract_dir_id(headers: &HeaderMap, query_dir: Option<String>) -> Option<String> {
+    query_dir
+        .and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .or_else(|| {
+            headers
+                .get("X-Upload-Dir")
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())
+        })
+}
+
+async fn resolve_target_directory(
+    state: &AppState,
+    dir_id: Option<String>,
+) -> Result<(PathBuf, String), AppError> {
+    let requested = dir_id.unwrap_or_else(|| "root".to_string());
+    let trimmed = requested.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::BadRequest(
+            "Directory id cannot be empty".to_string(),
+        ));
+    }
+
+    if trimmed.eq_ignore_ascii_case("root") {
+        return Ok((state.canonical_root.as_ref().clone(), "root".to_string()));
+    }
+
+    let entry = state
+        .catalog
+        .resolve_id(trimmed)
+        .await
+        .map_err(|err| AppError::Internal(err.to_string()))?
+        .ok_or_else(|| AppError::NotFound(NOT_FOUND_MESSAGE.to_string()))?;
+
+    if !entry.is_dir {
+        return Err(AppError::BadRequest(
+            "Directory id must reference a directory".to_string(),
+        ));
+    }
+
+    let full_path = if entry.relative_path.is_empty() {
+        state.canonical_root.as_ref().clone()
+    } else {
+        state.canonical_root.join(&entry.relative_path)
+    };
+
+    Ok((full_path, trimmed.to_string()))
+}
+
+fn upload_links(base_url: &str, file_id: &str, dir_id: &str) -> (String, String) {
+    let trimmed = base_url.trim_end_matches('/');
+    (
+        format!("{}/download?id={}", trimmed, file_id),
+        format!("{}/list?id={}", trimmed, dir_id),
+    )
 }
