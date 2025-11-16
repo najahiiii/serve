@@ -677,29 +677,34 @@ async fn parent_link(state: &AppState, requested_path: &str) -> Result<Option<St
         return Ok(None);
     }
 
-    let mut len = 0usize;
+    let mut depth = 0usize;
     for component in Path::new(requested_path).components() {
         match component {
-            Component::Normal(_) => len += 1,
+            Component::Normal(_) => depth += 1,
             Component::ParentDir | Component::RootDir => {
-                if len == 0 {
+                if depth == 0 {
                     return Ok(None);
                 }
-                len -= 1;
+                depth -= 1;
             }
             Component::CurDir => {}
             Component::Prefix(_) => return Ok(None),
         }
     }
 
-    if len == 0 {
+    if depth == 0 {
+        return Ok(Some("/list?id=root".to_string()));
+    }
+
+    let parent_depth = depth.saturating_sub(1);
+    if parent_depth == 0 {
         return Ok(Some("/list?id=root".to_string()));
     }
 
     let parts: Vec<&str> = requested_path
         .split('/')
         .filter(|segment| !segment.is_empty())
-        .take(len)
+        .take(parent_depth)
         .collect();
     let parent_path = parts.join("/");
 
