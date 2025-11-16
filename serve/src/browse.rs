@@ -342,7 +342,7 @@ async fn render_directory(
                     "modified": entry.modified_display,
                     "url": absolute,
                     "path": entry.relative_path,
-                    "browse_url": browse_absolute,
+                    "list_url": browse_absolute,
                     "download_url": download_absolute,
                     "is_dir": entry.is_dir,
                     "mime_type": entry.mime_type,

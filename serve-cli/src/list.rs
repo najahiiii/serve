@@ -29,7 +29,7 @@ pub struct ListEntry {
     #[serde(default)]
     pub mime_type: String,
     #[serde(default)]
-    pub browse_url: Option<String>,
+    pub list_url: Option<String>,
     #[serde(default)]
     pub download_url: Option<String>,
 }
@@ -42,8 +42,6 @@ struct TableEntry {
     id: String,
     #[tabled(rename = "Path")]
     path: String,
-    #[tabled(rename = "Name")]
-    name: String,
     #[tabled(rename = "Size")]
     size: String,
     #[tabled(rename = "MIME")]
@@ -94,9 +92,16 @@ pub fn list(host: &str, id: &str) -> Result<()> {
         .enumerate()
         .map(|(idx, entry)| TableEntry {
             index: idx + 1,
-            id: entry.id.clone().unwrap_or_else(|| "-".to_string()),
-            path: entry.path.clone().unwrap_or_else(|| "-".to_string()),
-            name: entry.name,
+            id: entry
+                .id
+                .as_deref()
+                .map(stylize_id)
+                .unwrap_or_else(|| "-".to_string()),
+            path: entry
+                .path
+                .clone()
+                .filter(|p| !p.is_empty())
+                .unwrap_or_else(|| entry.name.clone()),
             size: entry.size,
             mime: entry.mime_type,
             modified: entry.modified,
@@ -108,7 +113,7 @@ pub fn list(host: &str, id: &str) -> Result<()> {
             url: entry
                 .download_url
                 .clone()
-                .or(entry.browse_url.clone())
+                .or_else(|| entry.list_url.clone())
                 .unwrap_or(entry.url),
         })
         .collect();
@@ -118,4 +123,17 @@ pub fn list(host: &str, id: &str) -> Result<()> {
     println!("{}", table);
 
     Ok(())
+}
+
+fn stylize_id(id: &str) -> String {
+    let mut styled = String::with_capacity(id.len());
+    for (idx, ch) in id.chars().enumerate() {
+        let next = if idx % 2 == 0 {
+            ch.to_ascii_uppercase()
+        } else {
+            ch.to_ascii_lowercase()
+        };
+        styled.push(next);
+    }
+    styled
 }
