@@ -283,9 +283,6 @@ fn show_config(args: ShowConfigArgs) -> Result<(), AppError> {
             "<hidden>".to_string()
         }
     );
-    if !config.upload_token.is_empty() && !args.show_token {
-        println!("(pass --show-token to display the configured token)");
-    }
     println!("Max file size  : {} bytes", config.max_file_size);
 
     let mut hidden: Vec<_> = config.blacklisted_files.iter().cloned().collect();
@@ -309,6 +306,10 @@ fn show_config(args: ShowConfigArgs) -> Result<(), AppError> {
             extensions.join(", ")
         }
     );
+    if !config.upload_token.is_empty() && !args.show_token {
+        println!();
+        println!("Tip: pass --show-token to display the configured token");
+    }
 
     Ok(())
 }
