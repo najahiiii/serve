@@ -91,11 +91,7 @@ pub fn list(host: &str, id: &str) -> Result<()> {
         .enumerate()
         .map(|(idx, entry)| TableEntry {
             index: idx + 1,
-            id: entry
-                .id
-                .as_deref()
-                .map(stylize_id)
-                .unwrap_or_else(|| "-".to_string()),
+            id: entry.id.clone().unwrap_or_else(|| "-".to_string()),
             path: entry
                 .path
                 .clone()
@@ -117,17 +113,4 @@ pub fn list(host: &str, id: &str) -> Result<()> {
     println!("{}", table);
 
     Ok(())
-}
-
-fn stylize_id(id: &str) -> String {
-    let mut styled = String::with_capacity(id.len());
-    for (idx, ch) in id.chars().enumerate() {
-        let next = if idx % 2 == 0 {
-            ch.to_ascii_uppercase()
-        } else {
-            ch.to_ascii_lowercase()
-        };
-        styled.push(next);
-    }
-    styled
 }

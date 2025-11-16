@@ -132,9 +132,10 @@ impl Catalog {
                     )
                     .optional()?;
 
-                let id = existing_id.unwrap_or_else(|| Ulid::new().to_string());
+                let id =
+                    existing_id.unwrap_or_else(|| stylize_ulid(Ulid::new().to_string()));
                 let parent_id = match params_parent {
-                   Some(parent) => conn
+                    Some(parent) => conn
                         .query_row(
                             "SELECT id FROM entries WHERE path = ?1",
                             [parent.as_str()],
@@ -268,7 +269,7 @@ impl Catalog {
                     let path = entry.relative_path.clone();
                     let id = id_map
                         .entry(path.clone())
-                        .or_insert_with(|| Ulid::new().to_string())
+                        .or_insert_with(|| stylize_ulid(Ulid::new().to_string()))
                         .clone();
 
                     let parent_id = entry
@@ -324,6 +325,19 @@ fn current_unix_timestamp() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::from_secs(0))
         .as_secs() as i64
+}
+
+fn stylize_ulid(id: String) -> String {
+    let mut styled = String::with_capacity(id.len());
+    for (idx, ch) in id.chars().enumerate() {
+        let next = if idx % 2 == 0 {
+            ch.to_ascii_uppercase()
+        } else {
+            ch.to_ascii_lowercase()
+        };
+        styled.push(next);
+    }
+    styled
 }
 
 struct ScannedEntry {
