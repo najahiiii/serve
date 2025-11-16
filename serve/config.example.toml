@@ -12,6 +12,9 @@ max_file_size = 4194304000
 # Set the root directory to expose. Relative paths are resolved from the binary's working directory.
 root = "./public"
 
+# Interval (in seconds) between background catalog refreshes.
+catalog_refresh_secs = 300
+
 # Files or directories that must never be served.
 blacklisted_files = [".git", ".github", ".gitignore"]
 

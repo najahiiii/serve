@@ -16,6 +16,7 @@ pub struct Config {
     pub root_override: Option<PathBuf>,
     pub config_dir: Option<PathBuf>,
     pub root_source: RootSource,
+    pub catalog_refresh_secs: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +39,7 @@ impl Config {
         let mut root_override: Option<PathBuf> = None;
         let mut config_dir: Option<PathBuf> = None;
         let mut root_source = RootSource::Default;
+        let mut catalog_refresh_secs = defaults.catalog_refresh_secs;
 
         let candidates = resolve_config_candidates(config_path)?;
 
@@ -84,6 +86,12 @@ impl Config {
                     if !root.trim().is_empty() {
                         root_override = Some(PathBuf::from(&root));
                         root_source = RootSource::ConfigFile;
+                    }
+                }
+
+                if let Some(interval) = parsed.catalog_refresh_secs {
+                    if interval > 0 {
+                        catalog_refresh_secs = interval;
                     }
                 }
 
@@ -141,6 +149,14 @@ impl Config {
             }
         }
 
+        if let Ok(value) = env::var("SERVE_CATALOG_REFRESH_SECS") {
+            if let Ok(parsed) = value.parse::<u64>() {
+                if parsed > 0 {
+                    catalog_refresh_secs = parsed;
+                }
+            }
+        }
+
         Ok(Self {
             port,
             upload_token,
@@ -150,6 +166,7 @@ impl Config {
             root_override,
             config_dir,
             root_source,
+            catalog_refresh_secs,
         })
     }
 
@@ -164,6 +181,7 @@ struct DefaultValues {
     max_file_size: u64,
     blacklisted_files: HashSet<String>,
     allowed_extensions: HashSet<String>,
+    catalog_refresh_secs: u64,
 }
 
 fn default_values() -> DefaultValues {
@@ -176,6 +194,7 @@ fn default_values() -> DefaultValues {
             .map(|s| s.to_string())
             .collect(),
         allowed_extensions: default_allowed_extensions(),
+        catalog_refresh_secs: 300,
     }
 }
 
@@ -258,6 +277,7 @@ struct FileConfig {
     blacklisted_files: Option<Vec<String>>,
     allowed_extensions: Option<Vec<String>>,
     root: Option<String>,
+    catalog_refresh_secs: Option<u64>,
 }
 
 #[derive(Debug)]

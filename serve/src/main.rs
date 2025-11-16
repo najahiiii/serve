@@ -44,6 +44,7 @@ blacklisted_files = ["utils", "server.py"]
 allowed_extensions = [
   "mp3", "wav", "mp4", "zip", "pdf", "png", "jpg"
 ]
+catalog_refresh_secs = 300
 "#;
 const POWERED_BY: &str = concat!("serve/", env!("CARGO_PKG_VERSION"));
 // Smaller chunk keeps initial response snappy while still streaming efficiently.
@@ -205,6 +206,7 @@ async fn run_server(args: RunArgs) -> Result<(), AppError> {
         catalog.clone(),
         canonical_root.clone(),
         Arc::new(config.blacklisted_files.clone()),
+        config.catalog_refresh_secs,
         catalog_rx,
     );
     tokio::spawn(async move {
@@ -317,6 +319,7 @@ fn show_config(args: ShowConfigArgs) -> Result<(), AppError> {
         }
     );
     println!("Max file size  : {} bytes", config.max_file_size);
+    println!("Catalog refresh: {} seconds", config.catalog_refresh_secs);
 
     let mut hidden: Vec<_> = config.blacklisted_files.iter().cloned().collect();
     hidden.sort();

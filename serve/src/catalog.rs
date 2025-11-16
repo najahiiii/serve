@@ -434,13 +434,15 @@ impl CatalogWorker {
         catalog: Arc<Catalog>,
         root: Arc<PathBuf>,
         blacklist: Arc<HashSet<String>>,
+        interval_secs: u64,
         rx: mpsc::Receiver<CatalogCommand>,
     ) -> Self {
+        let clamped = interval_secs.max(1);
         Self {
             catalog,
             root,
             blacklist,
-            interval: Duration::from_secs(300),
+            interval: Duration::from_secs(clamped),
             rx,
         }
     }
