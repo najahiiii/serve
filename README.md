@@ -10,6 +10,7 @@ This repository contains two Rust binaries for a simple file server:
 - Directory listing with HTML template
 - File download with proper `Content-Length`, `Accept-Ranges` and optional `view=true`
 - Authenticated file uploads (`X-Upload-Token`)
+- Authenticated delete endpoint for files/directories
 - Optional upload path overrides via header, form field, query
 - Configurable defaults via TOML/config/env/flags
 - Gzip for text responses
@@ -69,33 +70,47 @@ An OpenResty/Nginx v1.25+ server block example is available at `deploy/reverse-p
 
 ```bash
 cargo build --package serve-cli --release
-./target/release/serve-cli list --host https://files.example.com --path dir/
+./target/release/serve-cli list --host https://files.example.com --id root
+./target/release/serve-cli info --host https://files.example.com \
+    --id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+./target/release/serve-cli download --host https://files.example.com \
+    --id 01ARZ3NDEKTSV4RRFFQ69G5FAV --out archive.tar
+./target/release/serve-cli download --host https://files.example.com \
+    --id root --recursive --out backups
 ./target/release/serve-cli upload --host https://files.example.com \
-    --file ./archive.tar --token Inipassword_ --upload-path backups/
-./target/release/serve-cli download --host https://files.example.com \
-    --path dir/archive.tar --out archive.tar
-./target/release/serve-cli download --host https://files.example.com \
-    --path dir/ --recursive --out backups
+    --file ./archive.tar --token Inipassword_ --parent-id root
+./target/release/serve-cli delete --host https://files.example.com \
+    --id 01ARZ3NDEKTSV4RRFFQ69G5FAV --token Inipassword_
 ```
 
 Install via `make build` / `make install` to populate `dist/serve-cli` and `/usr/local/bin/serve-cli`.
 
-The server emits JSON directory listings when clients send the header `X-Serve-Client: serve-cli` (used by the helper); browsers still receive the HTML view by default.
+Commands operate on catalog IDs (e.g. `root`, entries returned by `serve-cli list` or `serve-cli info`). The server emits JSON directory listings when clients send the header `X-Serve-Client: serve-cli` (used by the helper); browsers still receive the HTML view by default.
 
 ## Upload API
 
 ```bash
-POST /upload
+POST /upload?dir=<catalog_id>
 Headers:
   X-Upload-Token: <token>
-  X-Upload-Path: optional path
+  X-Upload-Dir: optional catalog ID (fallback to query ?dir)
   X-Allow-No-Ext: true|1|yes to bypass extension check
 Form:
   file=@path/to/upload
-  path=optional directory
+  dir=optional catalog ID (defaults to root)
 ```
 
 Response JSON includes `powered_by`, `view`, `download` URL.
+
+## Delete API
+
+```bash
+DELETE /delete?id=<catalog_id>
+Headers:
+  X-Upload-Token: <token>
+```
+
+Successful responses include the catalog ID, normalized path, entry type, and `"status": "deleted"`. The CLI helper wraps this via `serve-cli delete`.
 
 ## Logging
 
