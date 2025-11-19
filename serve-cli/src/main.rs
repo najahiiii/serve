@@ -1,6 +1,7 @@
 mod cleanup;
 mod config;
 mod constants;
+mod delete;
 mod download;
 mod http;
 mod info;
@@ -110,6 +111,15 @@ enum Command {
         #[arg(long)]
         id: String,
     },
+    /// Delete a file or directory by catalog ID
+    Delete {
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        token: Option<String>,
+    },
     /// Interactive configuration helper
     Setup,
     /// Display serve-cli version information
@@ -186,6 +196,11 @@ fn main() -> Result<()> {
         Command::Info { host, id } => {
             let resolved_host = resolve_host(host, &app_config);
             info::show_info(&resolved_host, &id)
+        }
+        Command::Delete { host, id, token } => {
+            let resolved_host = resolve_host(host, &app_config);
+            let resolved_token = resolve_token(token, &app_config)?;
+            delete::delete(&resolved_host, &resolved_token, &id)
         }
         Command::Setup => run_setup(config.as_deref(), &app_config),
         Command::Version => {

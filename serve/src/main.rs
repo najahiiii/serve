@@ -11,7 +11,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{Extensions, HeaderMap, HeaderValue, StatusCode, Version, header},
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use catalog::{Catalog, CatalogCommand, CatalogWorker};
 use clap::{Args, Parser, Subcommand};
@@ -246,6 +246,7 @@ async fn run_server(args: RunArgs) -> Result<(), AppError> {
         .route("/download", get(browse::download_by_id))
         .route("/list", get(browse::list_by_id))
         .route("/info", get(browse::get_info))
+        .route("/delete", delete(browse::delete_by_id))
         .route("/upload", post(uploads::handle_upload))
         .route(
             "/upload-stream",

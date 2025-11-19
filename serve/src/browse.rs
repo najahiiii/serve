@@ -14,7 +14,7 @@ use tokio_util::io::ReaderStream;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use crate::catalog::{CatalogEntry, CatalogEntryDetail, EntryInfo};
+use crate::catalog::{CatalogCommand, CatalogEntry, CatalogEntryDetail, EntryInfo};
 use crate::http_utils::{build_base_url, client_ip, client_user_agent, host_header};
 use crate::map_io_error;
 use crate::template;
@@ -58,6 +58,11 @@ pub(crate) struct InfoQuery {
     pub(crate) id: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct DeleteQuery {
+    pub(crate) id: String,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct InfoPayload {
     pub(crate) id: String,
@@ -73,6 +78,14 @@ pub(crate) struct InfoPayload {
     pub(crate) list_url: Option<String>,
     pub(crate) view_url: Option<String>,
     pub(crate) download_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct DeleteResponse {
+    pub(crate) id: String,
+    pub(crate) path: String,
+    pub(crate) is_dir: bool,
+    pub(crate) status: String,
 }
 
 pub(crate) async fn get_root() -> Result<Response, AppError> {
@@ -308,6 +321,59 @@ pub(crate) async fn get_info(
         list_url,
         view_url,
         download_url,
+    }))
+}
+
+pub(crate) async fn delete_by_id(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<DeleteQuery>,
+) -> Result<Json<DeleteResponse>, AppError> {
+    let provided_token = headers
+        .get("X-Upload-Token")
+        .and_then(|value| value.to_str().ok());
+    if provided_token != Some(state.config.upload_token.as_str()) {
+        return Err(AppError::Unauthorized("Unauthorized".to_string()));
+    }
+
+    let id = query.id.trim();
+    if id.is_empty() {
+        return Err(AppError::BadRequest("Missing id parameter".to_string()));
+    }
+
+    let entry = resolve_entry_by_id(&state, id).await?;
+    if entry.relative_path.trim().is_empty() {
+        return Err(AppError::BadRequest(
+            "Cannot delete the root directory".to_string(),
+        ));
+    }
+
+    let relative = entry.relative_path.trim_matches('/').to_string();
+    let full_path = state.canonical_root.join(&relative);
+    if !full_path.starts_with(&*state.canonical_root) {
+        return Err(AppError::BadRequest("Invalid path".to_string()));
+    }
+
+    let metadata = fs::metadata(&full_path).await.map_err(map_io_error)?;
+    if metadata.is_dir() {
+        fs::remove_dir_all(&full_path).await.map_err(map_io_error)?;
+    } else {
+        fs::remove_file(&full_path).await.map_err(map_io_error)?;
+    }
+
+    let _ = state.catalog_events.try_send(CatalogCommand::RefreshAll);
+
+    let display_path = if relative.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", relative)
+    };
+
+    Ok(Json(DeleteResponse {
+        id: id.to_string(),
+        path: display_path,
+        is_dir: metadata.is_dir(),
+        status: "deleted".to_string(),
     }))
 }
 
