@@ -70,22 +70,22 @@ An OpenResty/Nginx v1.25+ server block example is available at `deploy/reverse-p
 
 ```bash
 cargo build --package serve-cli --release
-./target/release/serve-cli list --host https://files.example.com --id root
+./target/release/serve-cli list --host https://files.example.com root
 ./target/release/serve-cli info --host https://files.example.com \
-    --id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+    01ARZ3NDEKTSV4RRFFQ69G5FAV
 ./target/release/serve-cli download --host https://files.example.com \
-    --id 01ARZ3NDEKTSV4RRFFQ69G5FAV --out archive.tar
+    01ARZ3NDEKTSV4RRFFQ69G5FAV --out archive.tar
 ./target/release/serve-cli download --host https://files.example.com \
-    --id root --recursive --out backups
+    root --recursive --out backups
 ./target/release/serve-cli upload --host https://files.example.com \
     --file ./archive.tar --token Inipassword_ --parent-id root
 ./target/release/serve-cli delete --host https://files.example.com \
-    --id 01ARZ3NDEKTSV4RRFFQ69G5FAV --token Inipassword_
+    01ARZ3NDEKTSV4RRFFQ69G5FAV --token Inipassword_
 ```
 
 Install via `make build` / `make install` to populate `dist/serve-cli` and `/usr/local/bin/serve-cli`.
 
-Commands operate on catalog IDs (e.g. `root`, entries returned by `serve-cli list` or `serve-cli info`). The server emits JSON directory listings when clients send the header `X-Serve-Client: serve-cli` (used by the helper); browsers still receive the HTML view by default.
+Commands operate on catalog IDs (e.g. `root`, entries returned by `serve-cli list` or `serve-cli info`). IDs can be passed positionally (as in the examples above) or via `--id <ID>`. The server emits JSON directory listings when clients send the header `X-Serve-Client: serve-cli` (used by the helper); browsers still receive the HTML view by default.
 
 ## Upload API
 

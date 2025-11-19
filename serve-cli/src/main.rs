@@ -15,7 +15,7 @@ use crate::constants::DEFAULT_HOST;
 use crate::download::ExistingFileStrategy;
 use crate::retry::total_retry_sleep_seconds;
 use anyhow::{Context, Result, anyhow};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -53,6 +53,42 @@ struct Cli {
     command: Command,
 }
 
+#[derive(Args, Clone, Debug, Default)]
+struct CatalogIdArg {
+    #[arg(long = "id", value_name = "ID", conflicts_with = "positional_id")]
+    flag_id: Option<String>,
+    #[arg(value_name = "ID", conflicts_with = "flag_id")]
+    positional_id: Option<String>,
+}
+
+impl CatalogIdArg {
+    fn provided(&self) -> Option<String> {
+        self.flag_id
+            .as_deref()
+            .and_then(Self::normalize)
+            .or_else(|| self.positional_id.as_deref().and_then(Self::normalize))
+    }
+
+    fn required(&self, context: &str) -> Result<String> {
+        self.provided().ok_or_else(|| {
+            anyhow!("{context} is required; pass --id <ID> or supply it as a positional argument")
+        })
+    }
+
+    fn with_default(&self, default: &str) -> String {
+        self.provided().unwrap_or_else(|| default.to_string())
+    }
+
+    fn normalize(value: &str) -> Option<String> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Display the currently configured defaults
@@ -61,9 +97,9 @@ enum Command {
     Download {
         #[arg(long)]
         host: Option<String>,
-        /// Catalog ID to download
-        #[arg(long)]
-        id: String,
+        /// Catalog ID to download (positional or --id)
+        #[command(flatten)]
+        target: CatalogIdArg,
         /// Output file (defaults to last path segment)
         #[arg(long)]
         out: Option<String>,
@@ -100,23 +136,25 @@ enum Command {
         /// Base host URL (e.g. https://files.example.com)
         #[arg(long)]
         host: Option<String>,
-        /// Catalog ID to list (use "root" for the top-level)
-        #[arg(long, default_value = "root")]
-        id: String,
+        /// Catalog ID to list (positional or --id, defaults to root)
+        #[command(flatten)]
+        target: CatalogIdArg,
     },
     /// Show URLs and metadata for a specific entry ID
     Info {
         #[arg(long)]
         host: Option<String>,
-        #[arg(long)]
-        id: String,
+        /// Catalog ID to inspect (positional or --id)
+        #[command(flatten)]
+        target: CatalogIdArg,
     },
     /// Delete a file or directory by catalog ID
     Delete {
         #[arg(long)]
         host: Option<String>,
-        #[arg(long)]
-        id: String,
+        /// Catalog ID to delete (positional or --id)
+        #[command(flatten)]
+        target: CatalogIdArg,
         #[arg(long)]
         token: Option<String>,
     },
@@ -142,7 +180,7 @@ fn main() -> Result<()> {
         Command::Config => show_config(&loaded_config, config.as_deref()),
         Command::Download {
             host,
-            id,
+            target,
             out,
             recursive,
             connections,
@@ -150,6 +188,7 @@ fn main() -> Result<()> {
             dup,
         } => {
             let resolved_host = resolve_host(host, &app_config);
+            let entry_id = target.required("download ID")?;
             let existing_strategy = if skip {
                 ExistingFileStrategy::Skip
             } else if dup {
@@ -159,7 +198,7 @@ fn main() -> Result<()> {
             };
             download::download(
                 &resolved_host,
-                &id,
+                &entry_id,
                 out,
                 recursive,
                 connections.clamp(1, 16),
@@ -189,18 +228,25 @@ fn main() -> Result<()> {
                 retry_attempts,
             )
         }
-        Command::List { host, id } => {
+        Command::List { host, target } => {
             let resolved_host = resolve_host(host, &app_config);
-            list::list(&resolved_host, &id)
+            let entry_id = target.with_default("root");
+            list::list(&resolved_host, &entry_id)
         }
-        Command::Info { host, id } => {
+        Command::Info { host, target } => {
             let resolved_host = resolve_host(host, &app_config);
-            info::show_info(&resolved_host, &id)
+            let entry_id = target.required("info ID")?;
+            info::show_info(&resolved_host, &entry_id)
         }
-        Command::Delete { host, id, token } => {
+        Command::Delete {
+            host,
+            target,
+            token,
+        } => {
             let resolved_host = resolve_host(host, &app_config);
             let resolved_token = resolve_token(token, &app_config)?;
-            delete::delete(&resolved_host, &resolved_token, &id)
+            let entry_id = target.required("delete ID")?;
+            delete::delete(&resolved_host, &resolved_token, &entry_id)
         }
         Command::Setup => run_setup(config.as_deref(), &app_config),
         Command::Version => {
