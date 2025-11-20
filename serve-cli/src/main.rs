@@ -15,7 +15,7 @@ use crate::constants::DEFAULT_HOST;
 use crate::download::ExistingFileStrategy;
 use crate::retry::total_retry_sleep_seconds;
 use anyhow::{Context, Result, anyhow};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueHint};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -125,7 +125,7 @@ enum Command {
     Upload {
         #[arg(long)]
         host: Option<String>,
-        #[arg(long)]
+        #[arg(value_name = "FILE", value_hint = ValueHint::FilePath)]
         file: String,
         #[arg(long)]
         token: Option<String>,

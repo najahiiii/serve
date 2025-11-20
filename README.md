@@ -78,7 +78,7 @@ cargo build --package serve-cli --release
 ./target/release/serve-cli download --host https://files.example.com \
     root --recursive --out backups
 ./target/release/serve-cli upload --host https://files.example.com \
-    --file ./archive.tar --token Inipassword_ --parent-id root
+    ./archive.tar --token Inipassword_ --parent-id root
 ./target/release/serve-cli delete --host https://files.example.com \
     01ARZ3NDEKTSV4RRFFQ69G5FAV --token Inipassword_
 ```
