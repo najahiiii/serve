@@ -9,7 +9,7 @@ This repository contains two Rust binaries for a simple file server:
 
 - Directory listing with HTML template
 - File download with proper `Content-Length`, `Accept-Ranges` and optional `view=true`
-- Authenticated file uploads (`X-Upload-Token`)
+- Authenticated file uploads (`X-Serve-Token`)
 - Authenticated delete endpoint for files/directories
 - Optional upload path overrides via header, form field, query
 - Configurable defaults via TOML/config/env/flags
@@ -43,7 +43,7 @@ Upload token, root paths, extension whitelist, blacklist can be customized.
 ./dist/serve run --config /path/to/config.toml
 ```
 
-CLI supports `--root`, `--port`, `--upload-token`, `--max-file-size`, etc.  `init-config` subcommand writes `$HOME/.config/serve/config.toml` template.
+CLI supports `--root`, `--port`, `--upload-token`, `--max-file-size`, etc. `init-config` subcommand writes `$HOME/.config/serve/config.toml` template.
 
 ## systemd deployment
 
@@ -92,7 +92,7 @@ Commands operate on catalog IDs (e.g. `root`, entries returned by `serve-cli lis
 ```bash
 POST /upload?dir=<catalog_id>
 Headers:
-  X-Upload-Token: <token>
+  X-Serve-Token: <token>
   X-Upload-Dir: optional catalog ID (fallback to query ?dir)
   X-Allow-No-Ext: true|1|yes to bypass extension check
 Form:
@@ -107,7 +107,7 @@ Response JSON includes `powered_by`, `view`, `download` URL.
 ```bash
 DELETE /delete?id=<catalog_id>
 Headers:
-  X-Upload-Token: <token>
+  X-Serve-Token: <token>
 ```
 
 Successful responses include the catalog ID, normalized path, entry type, and `"status": "deleted"`. The CLI helper wraps this via `serve-cli delete`.

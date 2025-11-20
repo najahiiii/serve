@@ -96,7 +96,7 @@ fn perform_upload_attempt(
         let mut request = client
             .put(url)
             .header("X-Serve-Client", CLIENT_HEADER_VALUE)
-            .header("X-Upload-Token", token)
+            .header("X-Serve-Token", token)
             .header(header::CONTENT_TYPE, "application/octet-stream")
             .body(Body::sized(reader, file_size));
 
@@ -127,7 +127,7 @@ fn perform_upload_attempt(
         let mut request = client
             .post(url)
             .header("X-Serve-Client", CLIENT_HEADER_VALUE)
-            .header("X-Upload-Token", token)
+            .header("X-Serve-Token", token)
             .multipart(form);
         if allow_no_ext {
             request = request.header("X-Allow-No-Ext", "true");

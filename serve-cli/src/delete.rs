@@ -25,7 +25,7 @@ pub fn delete(host: &str, token: &str, id: &str) -> Result<()> {
     let response = client
         .delete(url.clone())
         .header("X-Serve-Client", CLIENT_HEADER_VALUE)
-        .header("X-Upload-Token", token)
+        .header("X-Serve-Token", token)
         .header(ACCEPT, "application/json")
         .send()
         .with_context(|| format!("request failed for {}", url))?

@@ -43,3 +43,12 @@ pub(crate) fn client_user_agent(headers: &HeaderMap) -> String {
         .map(|ua| ua.to_string())
         .unwrap_or_else(|| "unknown".to_string())
 }
+
+pub(crate) fn auth_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("X-Serve-Token")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+}

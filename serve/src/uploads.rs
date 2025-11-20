@@ -13,7 +13,7 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 use crate::catalog::{CatalogCommand, EntryInfo};
-use crate::http_utils::{build_base_url, client_ip, client_user_agent};
+use crate::http_utils::{auth_token, build_base_url, client_ip, client_user_agent};
 use crate::map_io_error;
 use crate::utils::{is_allowed_file, parent_relative_path, secure_filename, unix_timestamp};
 use crate::{AppError, AppState, NOT_FOUND_MESSAGE, POWERED_BY};
@@ -40,10 +40,8 @@ pub(crate) async fn handle_upload(
     Query(query): Query<UploadQuery>,
     mut multipart: Multipart,
 ) -> Result<Response, AppError> {
-    let provided_token = headers
-        .get("X-Upload-Token")
-        .and_then(|value| value.to_str().ok());
-    if provided_token != Some(state.config.upload_token.as_str()) {
+    let provided_token = auth_token(&headers);
+    if provided_token.as_deref() != Some(state.config.upload_token.as_str()) {
         return Err(AppError::Unauthorized("Unauthorized".to_string()));
     }
 
@@ -244,10 +242,8 @@ pub(crate) async fn handle_upload_stream(
     Query(query): Query<UploadStreamQuery>,
     body: Body,
 ) -> Result<Response, AppError> {
-    let provided_token = headers
-        .get("X-Upload-Token")
-        .and_then(|value| value.to_str().ok());
-    if provided_token != Some(state.config.upload_token.as_str()) {
+    let provided_token = auth_token(&headers);
+    if provided_token.as_deref() != Some(state.config.upload_token.as_str()) {
         return Err(AppError::Unauthorized("Unauthorized".to_string()));
     }
 

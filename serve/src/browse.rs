@@ -15,7 +15,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use crate::catalog::{CatalogCommand, CatalogEntry, CatalogEntryDetail, EntryInfo};
-use crate::http_utils::{build_base_url, client_ip, client_user_agent, host_header};
+use crate::http_utils::{auth_token, build_base_url, client_ip, client_user_agent, host_header};
 use crate::map_io_error;
 use crate::template;
 use crate::utils::{
@@ -329,10 +329,8 @@ pub(crate) async fn delete_by_id(
     headers: HeaderMap,
     Query(query): Query<DeleteQuery>,
 ) -> Result<Json<DeleteResponse>, AppError> {
-    let provided_token = headers
-        .get("X-Upload-Token")
-        .and_then(|value| value.to_str().ok());
-    if provided_token != Some(state.config.upload_token.as_str()) {
+    let provided_token = auth_token(&headers);
+    if provided_token.as_deref() != Some(state.config.upload_token.as_str()) {
         return Err(AppError::Unauthorized("Unauthorized".to_string()));
     }
 

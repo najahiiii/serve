@@ -3,7 +3,7 @@
 # Optional: override the listening port (defaults to 3435).
 port = 3435
 
-# Token required in the X-Upload-Token header for uploads.
+# Token required in the X-Serve-Token header for uploads and delete.
 upload_token = "abogoboga"
 
 # Maximum upload size in bytes (~3.8 GiB).
