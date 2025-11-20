@@ -2,6 +2,7 @@ use crate::constants::CLIENT_HEADER_VALUE;
 use crate::http::{build_client, build_endpoint_url, parse_json};
 use crate::progress::{create_progress_bar, finish_progress};
 use crate::retry::retry;
+use anyhow::anyhow;
 use anyhow::{Context, Result};
 use reqwest::blocking::{Body, Client, RequestBuilder, Response, multipart};
 use reqwest::header;
@@ -38,14 +39,18 @@ pub fn upload(
 ) -> Result<()> {
     let client = build_client()?;
 
-    if !Path::new(file_path).exists() {
+    let path = Path::new(file_path);
+    if !path.exists() {
         anyhow::bail!("file not found: {}", file_path);
     }
 
     let metadata = std::fs::metadata(file_path)
         .with_context(|| format!("failed to read metadata for {}", file_path))?;
+    if metadata.is_dir() {
+        return Err(anyhow!("cannot upload directories; supply a file path"));
+    }
     let file_size = metadata.len();
-    let file_name = Path::new(file_path)
+    let file_name = path
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("upload.bin")
