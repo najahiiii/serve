@@ -1,6 +1,6 @@
 use crate::cleanup::{TempCleanupGuard, track_temp_file, untrack_temp_file};
 use crate::constants::CLIENT_HEADER_VALUE;
-use crate::http::{build_client, build_endpoint_url};
+use crate::http::{build_client, build_endpoint_url, parse_json};
 use crate::list::ListResponse;
 use crate::progress::{
     self, ActiveConnectionGuard, PARTIAL_STATE_UPDATE_THRESHOLD, create_progress_bar,
@@ -36,6 +36,16 @@ struct DownloadOutcome {
     skipped: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct InfoSummary {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    is_dir: bool,
+}
+
 const MAX_CHUNK_SIZE: u64 = 256 * 1024 * 1024;
 
 fn build_download_url(host: &str, id: &str) -> Result<Url> {
@@ -63,13 +73,18 @@ pub fn download(
     }
 
     let client = build_client()?;
-    if let Some(listing) = fetch_listing_optional(&client, host, trimmed)? {
+    let entry_info = fetch_entry_info(&client, host, trimmed)?;
+
+    if entry_info.is_dir {
         if !recursive {
             anyhow::bail!(
                 "ID {} is a directory. Pass --recursive to download it.",
                 trimmed
             );
         }
+
+        let listing = fetch_listing_optional(&client, host, trimmed)?
+            .ok_or_else(|| anyhow!("failed to list directory {}", trimmed))?;
 
         let mut base_local = match out_override {
             Some(path) => Path::new(&path).to_path_buf(),
@@ -107,9 +122,10 @@ pub fn download(
         return Ok(());
     }
 
-    let output_path = out_override
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("--out is required when downloading a file by id"))?;
+    let output_path = match out_override {
+        Some(path) => PathBuf::from(path),
+        None => default_output_path(&entry_info, trimmed),
+    };
     let download_url = build_download_url(host, trimmed)?;
     let outcome = download_file_with_url(
         &client,
@@ -898,6 +914,40 @@ fn download_directory_recursive(
     }
 
     Ok(())
+}
+
+fn default_output_path(info: &InfoSummary, fallback_id: &str) -> PathBuf {
+    let trimmed_name = info.name.trim();
+    if !trimmed_name.is_empty() {
+        return PathBuf::from(trimmed_name);
+    }
+
+    let trimmed_path = info.path.trim_matches('/');
+    if let Some(segment) = trimmed_path.rsplit('/').find(|segment| !segment.is_empty()) {
+        return PathBuf::from(segment);
+    }
+
+    PathBuf::from(format!("download-{fallback_id}"))
+}
+
+fn fetch_entry_info(client: &Client, host: &str, id: &str) -> Result<InfoSummary> {
+    let mut url = build_endpoint_url(host, "/info")?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.clear();
+        pairs.append_pair("id", id);
+    }
+
+    let response = client
+        .get(url.clone())
+        .header("X-Serve-Client", CLIENT_HEADER_VALUE)
+        .header(ACCEPT, "application/json")
+        .send()
+        .with_context(|| format!("request failed for {}", url))?
+        .error_for_status()
+        .with_context(|| format!("server returned error for {}", url))?;
+
+    parse_json(response)
 }
 
 fn fetch_listing_optional(client: &Client, host: &str, id: &str) -> Result<Option<ListResponse>> {
