@@ -4,7 +4,7 @@ use axum::body::Body;
 use axum::extract::{Multipart, Query, State, multipart::MultipartError};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
-use chrono::Utc;
+use chrono::{Local, Utc};
 use futures_util::StreamExt;
 use mime_guess::MimeGuess;
 use pathdiff::diff_paths;
@@ -15,7 +15,9 @@ use tokio::io::AsyncWriteExt;
 use crate::catalog::{CatalogCommand, EntryInfo};
 use crate::http_utils::{auth_token, build_base_url, client_ip, client_user_agent};
 use crate::map_io_error;
-use crate::utils::{is_allowed_file, parent_relative_path, secure_filename, unix_timestamp};
+use crate::utils::{
+    format_modified_time, is_allowed_file, parent_relative_path, secure_filename, unix_timestamp,
+};
 use crate::{AppError, AppState, NOT_FOUND_MESSAGE, POWERED_BY};
 
 #[derive(Debug, Deserialize)]
@@ -170,11 +172,12 @@ pub(crate) async fn handle_upload(
         let base_url = build_base_url(&headers);
         let (download_url, list_url) = upload_links(&base_url, &entry_id, &resolved_dir_id);
 
+        let created_date = format_modified_time(Utc::now().with_timezone(&Local));
         saved_file = Some(UploadResponse {
             name: safe_name,
             size_bytes: total_bytes,
             mime_type,
-            created_date: Utc::now().to_rfc3339(),
+            created_date,
             id: entry_id,
             dir_id: resolved_dir_id.clone(),
             download_url,
@@ -372,11 +375,12 @@ pub(crate) async fn handle_upload_stream(
     let base_url = build_base_url(&headers);
     let (download_url, list_url) = upload_links(&base_url, &entry_id, &resolved_dir_id);
 
+    let created_date = format_modified_time(Utc::now().with_timezone(&Local));
     let saved = UploadResponse {
         name: safe_name,
         size_bytes: total_bytes,
         mime_type,
-        created_date: Utc::now().to_rfc3339(),
+        created_date,
         id: entry_id,
         dir_id: resolved_dir_id.clone(),
         download_url,
