@@ -47,7 +47,7 @@ struct Cli {
     #[arg(long, global = true)]
     config: Option<PathBuf>,
     /// Override maximum retry attempts
-    #[arg(long, global = true)]
+    #[arg(short = 'R', long, global = true)]
     retries: Option<usize>,
     #[command(subcommand)]
     command: Command,
@@ -101,13 +101,18 @@ enum Command {
         #[command(flatten)]
         target: CatalogIdArg,
         /// Output file (defaults to last path segment)
-        #[arg(long)]
+        #[arg(short = 'O', long)]
         out: Option<String>,
         /// Download directories recursively
-        #[arg(long, default_value_t = false)]
+        #[arg(short = 'r', long, default_value_t = false)]
         recursive: bool,
         /// Number of parts to split the download into (requires range support)
-        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=16))]
+        #[arg(
+            short = 'C',
+            long,
+            default_value_t = 1,
+            value_parser = clap::value_parser!(u8).range(1..=16)
+        )]
         connections: u8,
         /// Skip download if local file already exists
         #[arg(long, default_value_t = false, conflicts_with = "dup")]
@@ -124,7 +129,7 @@ enum Command {
         file: String,
         #[arg(long)]
         token: Option<String>,
-        #[arg(long, help = "Target directory ID (default root)")]
+        #[arg(short = 'p', long, help = "Target directory ID (default root)")]
         parent_id: Option<String>,
         #[arg(long, default_value_t = false)]
         allow_no_ext: bool,
