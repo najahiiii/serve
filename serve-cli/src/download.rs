@@ -4,7 +4,7 @@ use crate::http::{build_client, build_endpoint_url, parse_json};
 use crate::list::ListResponse;
 use crate::progress::{
     self, ActiveConnectionGuard, PARTIAL_STATE_UPDATE_THRESHOLD, create_progress_bar,
-    create_progress_bar_with_message, finish_progress,
+    create_progress_bar_with_message,
 };
 use crate::retry::retry;
 use anyhow::{Context, Result, anyhow};
@@ -46,7 +46,26 @@ struct InfoSummary {
     is_dir: bool,
 }
 
-const MAX_CHUNK_SIZE: u64 = 256 * 1024 * 1024;
+const MAX_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
+
+fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
+    let mut value = bytes as f64;
+    let mut index = 0;
+
+    while value >= 1024.0 && index < UNITS.len() - 1 {
+        value /= 1024.0;
+        index += 1;
+    }
+
+    if index == 0 {
+        format!("{} {}", bytes, UNITS[index])
+    } else if value >= 10.0 {
+        format!("{:.0} {}", value, UNITS[index])
+    } else {
+        format!("{:.1} {}", value, UNITS[index])
+    }
+}
 
 fn build_download_url(host: &str, id: &str) -> Result<Url> {
     let mut url = build_endpoint_url(host, "/download")?;
@@ -126,11 +145,13 @@ pub fn download(
         Some(path) => PathBuf::from(path),
         None => default_output_path(&entry_info, trimmed),
     };
+
+    let remote_label = entry_display_name(&entry_info).unwrap_or_else(|| format!("id:{trimmed}"));
     let download_url = build_download_url(host, trimmed)?;
     let outcome = download_file_with_url(
         &client,
         download_url,
-        &format!("id:{trimmed}"),
+        &remote_label,
         &output_path,
         connections,
         existing_strategy,
@@ -255,7 +276,7 @@ fn download_file_once(
 
     if matches!(probe.length, Some(0)) {
         finalize_empty_file(&output_path)?;
-        println!("Downloaded 0 bytes from {}", remote_label);
+        println!("Downloaded {} from {}", format_size(0), remote_label);
         cleanup_guard.disarm();
         return Ok(DownloadOutcome {
             path: output_path,
@@ -285,9 +306,13 @@ fn download_file_once(
     cleanup_guard.disarm();
 
     if let Some(total) = probe.length {
-        println!("Downloaded {} bytes from {}", total, remote_label);
+        println!("Downloaded {} from {}", format_size(total), remote_label);
     } else {
-        println!("Downloaded {} bytes from {}", downloaded_len, remote_label);
+        println!(
+            "Downloaded {} from {}",
+            format_size(downloaded_len),
+            remote_label
+        );
     }
     Ok(DownloadOutcome {
         path: output_path,
@@ -747,7 +772,6 @@ fn download_to_single_file(
                 connection_limit,
                 max_retries,
             )?;
-            finish_progress(&progress, "Download complete");
             return finalize_temp_file(&temp_path, output, Some(total));
         } else if partial_state.is_some() {
             clear_partial_state(&temp_path);
@@ -791,7 +815,6 @@ fn download_to_single_file(
         progress.inc(existing);
     }
     let _bytes_written = stream_to_writer(&mut response, &mut writer, &progress)?;
-    finish_progress(&progress, "Download complete");
 
     drop(writer);
 
@@ -917,17 +940,24 @@ fn download_directory_recursive(
 }
 
 fn default_output_path(info: &InfoSummary, fallback_id: &str) -> PathBuf {
-    let trimmed_name = info.name.trim();
-    if !trimmed_name.is_empty() {
-        return PathBuf::from(trimmed_name);
-    }
-
-    let trimmed_path = info.path.trim_matches('/');
-    if let Some(segment) = trimmed_path.rsplit('/').find(|segment| !segment.is_empty()) {
-        return PathBuf::from(segment);
+    if let Some(name) = entry_display_name(info) {
+        return PathBuf::from(name);
     }
 
     PathBuf::from(format!("download-{fallback_id}"))
+}
+
+fn entry_display_name(info: &InfoSummary) -> Option<String> {
+    let trimmed_name = info.name.trim();
+    if !trimmed_name.is_empty() {
+        return Some(trimmed_name.to_string());
+    }
+
+    let trimmed_path = info.path.trim_matches('/');
+    trimmed_path
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .map(|segment| segment.to_string())
 }
 
 fn fetch_entry_info(client: &Client, host: &str, id: &str) -> Result<InfoSummary> {

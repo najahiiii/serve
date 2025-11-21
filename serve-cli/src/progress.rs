@@ -4,7 +4,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-pub const PARTIAL_STATE_UPDATE_THRESHOLD: u64 = 16 * 1024 * 1024; // 16 MiB
+pub const PARTIAL_STATE_UPDATE_THRESHOLD: u64 = 8 * 1024 * 1024; // 8 MiB
 
 pub fn create_progress_bar(total: Option<u64>, label: &str) -> ProgressBar {
     create_progress_bar_with_message(total, label, None)
@@ -22,7 +22,7 @@ pub fn create_progress_bar_with_message(
         pb.set_message(message.unwrap_or_default());
         pb.set_style(
             ProgressStyle::with_template(
-                "{prefix} {bar:40.cyan/blue} {bytes}/{total_bytes} ({percent:>3}%) ({eta}) {bytes_per_sec}{msg}",
+                "{prefix} {bar:40.cyan/blue} {bytes}/{total_bytes} ({percent:>3}%) [{elapsed_precise}] ({eta}) {bytes_per_sec}{msg}",
             )
             .unwrap()
             .progress_chars("##-"),
@@ -35,7 +35,7 @@ pub fn create_progress_bar_with_message(
         pb.set_message(message.unwrap_or_default());
         pb.set_style(
             ProgressStyle::with_template(
-                "{prefix} {spinner} {bytes} downloaded ({bytes_per_sec}){msg}",
+                "{prefix} {spinner} {bytes} downloaded [{elapsed_precise}] ({bytes_per_sec}){msg}",
             )
             .unwrap()
             .tick_strings(&["-", "\\", "|", "/"]),
