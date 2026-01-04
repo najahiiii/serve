@@ -92,6 +92,11 @@ pub(crate) async fn handle_upload(
             .and_then(|value| value.to_str().ok())
             .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
             .unwrap_or(false);
+        let allow_any_extension = headers
+            .get("X-Allow-All-Ext")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false);
 
         let clean_name = StdPath::new(&file_name)
             .file_name()
@@ -103,7 +108,7 @@ pub(crate) async fn handle_upload(
         let has_extension = StdPath::new(clean_name).extension().is_some();
         let extension_allowed = is_allowed_file(clean_name, &state.config.allowed_extensions);
 
-        if !extension_allowed {
+        if !allow_any_extension && !extension_allowed {
             if !(allow_missing_extension && !has_extension) {
                 return Err(AppError::BadRequest(
                     "No selected file or file type not allowed".to_string(),
@@ -280,6 +285,11 @@ pub(crate) async fn handle_upload_stream(
         .and_then(|value| value.to_str().ok())
         .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or_else(|| allow_no_ext.unwrap_or(false));
+    let allow_any_extension = headers
+        .get("X-Allow-All-Ext")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
 
     let clean_name = StdPath::new(&file_name)
         .file_name()
@@ -291,7 +301,7 @@ pub(crate) async fn handle_upload_stream(
     let has_extension = StdPath::new(clean_name).extension().is_some();
     let extension_allowed = is_allowed_file(clean_name, &state.config.allowed_extensions);
 
-    if !extension_allowed && !(allow_missing_extension && !has_extension) {
+    if !allow_any_extension && !extension_allowed && !(allow_missing_extension && !has_extension) {
         return Err(AppError::BadRequest(
             "No selected file or file type not allowed".to_string(),
         ));

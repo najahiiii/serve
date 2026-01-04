@@ -134,6 +134,8 @@ enum Command {
         #[arg(long, default_value_t = false)]
         allow_no_ext: bool,
         #[arg(long, default_value_t = false)]
+        bypass: bool,
+        #[arg(long, default_value_t = false)]
         stream: bool,
     },
     /// List directory contents from the server
@@ -217,6 +219,7 @@ fn main() -> Result<()> {
             token,
             parent_id,
             allow_no_ext,
+            bypass,
             stream,
         } => {
             let resolved_host = resolve_host(host, &app_config);
@@ -229,6 +232,7 @@ fn main() -> Result<()> {
                 &resolved_token,
                 &resolved_parent,
                 effective_allow,
+                bypass,
                 stream,
                 retry_attempts,
             )

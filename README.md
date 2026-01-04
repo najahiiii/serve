@@ -95,6 +95,7 @@ Headers:
   X-Serve-Token: <token>
   X-Upload-Dir: optional catalog ID (fallback to query ?dir)
   X-Allow-No-Ext: true|1|yes to bypass extension check
+  X-Allow-All-Ext: true|1|yes to bypass extension whitelist
 Form:
   file=@path/to/upload
   dir=optional catalog ID (defaults to root)

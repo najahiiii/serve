@@ -34,6 +34,7 @@ pub fn upload(
     token: &str,
     parent_id: &str,
     allow_no_ext: bool,
+    bypass_ext: bool,
     stream: bool,
     max_retries: usize,
 ) -> Result<()> {
@@ -64,6 +65,7 @@ pub fn upload(
             token,
             parent_id,
             allow_no_ext,
+            bypass_ext,
             stream,
             file_size,
             &file_name,
@@ -78,6 +80,7 @@ fn perform_upload_attempt(
     token: &str,
     parent_id: &str,
     allow_no_ext: bool,
+    bypass_ext: bool,
     stream: bool,
     file_size: u64,
     file_name: &str,
@@ -109,6 +112,9 @@ fn perform_upload_attempt(
         if allow_no_ext {
             request = request.header("X-Allow-No-Ext", "true");
         }
+        if bypass_ext {
+            request = request.header("X-Allow-All-Ext", "true");
+        }
 
         execute_request(request, &progress)?
     } else {
@@ -136,6 +142,9 @@ fn perform_upload_attempt(
             .multipart(form);
         if allow_no_ext {
             request = request.header("X-Allow-No-Ext", "true");
+        }
+        if bypass_ext {
+            request = request.header("X-Allow-All-Ext", "true");
         }
 
         execute_request(request, &progress)?
