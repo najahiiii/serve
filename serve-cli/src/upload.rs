@@ -167,17 +167,29 @@ fn execute_request(request: RequestBuilder, progress: &ProgressBar) -> Result<Re
     let response = match request.send() {
         Ok(resp) => resp,
         Err(err) => {
-            progress.abandon_with_message("Upload failed");
+            progress.finish_and_clear();
             return Err(err).context("upload request failed");
         }
     };
 
-    match response.error_for_status() {
-        Ok(resp) => Ok(resp),
-        Err(err) => {
-            progress.abandon_with_message("Upload failed");
-            Err(err).context("server returned error for upload")
-        }
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+
+    let body = response
+        .text()
+        .unwrap_or_else(|err| format!("failed to read error body: {err}"));
+    progress.finish_and_clear();
+    let detail = body.trim();
+    if detail.is_empty() {
+        Err(anyhow!(
+            "server returned error for upload (status {status})"
+        ))
+    } else {
+        Err(anyhow!(
+            "server returned error for upload (status {status}): {detail}"
+        ))
     }
 }
 
