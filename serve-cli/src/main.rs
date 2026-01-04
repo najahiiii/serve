@@ -44,10 +44,10 @@ const VERSION_SUMMARY: &str = concat!(
 )]
 struct Cli {
     /// Path to custom configuration file
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help = "Path to custom configuration file")]
     config: Option<PathBuf>,
     /// Override maximum retry attempts
-    #[arg(short = 'R', long, global = true)]
+    #[arg(short = 'R', long, global = true, help = "Override maximum retry attempts")]
     retries: Option<usize>,
     #[command(subcommand)]
     command: Command,
@@ -55,9 +55,14 @@ struct Cli {
 
 #[derive(Args, Clone, Debug, Default)]
 struct CatalogIdArg {
-    #[arg(long = "id", value_name = "ID", conflicts_with = "positional_id")]
+    #[arg(
+        long = "id",
+        value_name = "ID",
+        conflicts_with = "positional_id",
+        help = "Catalog ID"
+    )]
     flag_id: Option<String>,
-    #[arg(value_name = "ID", conflicts_with = "flag_id")]
+    #[arg(value_name = "ID", conflicts_with = "flag_id", help = "Catalog ID")]
     positional_id: Option<String>,
 }
 
@@ -95,7 +100,7 @@ enum Command {
     Config,
     /// Download a file from the server
     Download {
-        #[arg(long)]
+        #[arg(long, help = "Base host URL (e.g. https://files.example.com)")]
         host: Option<String>,
         /// Catalog ID to download (positional or --id)
         #[command(flatten)]
@@ -123,19 +128,23 @@ enum Command {
     },
     /// Upload a file to the server
     Upload {
-        #[arg(long)]
+        #[arg(long, help = "Base host URL (e.g. https://files.example.com)")]
         host: Option<String>,
         #[arg(value_name = "FILE", value_hint = ValueHint::FilePath)]
         file: String,
-        #[arg(long)]
+        #[arg(long, help = "Upload token (X-Serve-Token)")]
         token: Option<String>,
         #[arg(short = 'p', long, help = "Target directory ID (default root)")]
         parent_id: Option<String>,
-        #[arg(long, default_value_t = false)]
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Allow uploads without extension"
+        )]
         allow_no_ext: bool,
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = false, help = "Bypass extension whitelist")]
         bypass: bool,
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = false, help = "Use streaming upload")]
         stream: bool,
     },
     /// List directory contents from the server
@@ -149,7 +158,7 @@ enum Command {
     },
     /// Show URLs and metadata for a specific entry ID
     Info {
-        #[arg(long)]
+        #[arg(long, help = "Base host URL (e.g. https://files.example.com)")]
         host: Option<String>,
         /// Catalog ID to inspect (positional or --id)
         #[command(flatten)]
@@ -157,12 +166,12 @@ enum Command {
     },
     /// Delete a file or directory by catalog ID
     Delete {
-        #[arg(long)]
+        #[arg(long, help = "Base host URL (e.g. https://files.example.com)")]
         host: Option<String>,
         /// Catalog ID to delete (positional or --id)
         #[command(flatten)]
         target: CatalogIdArg,
-        #[arg(long)]
+        #[arg(long, help = "Delete token (X-Serve-Token)")]
         token: Option<String>,
     },
     /// Interactive configuration helper
