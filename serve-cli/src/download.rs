@@ -2,13 +2,10 @@ use crate::cleanup::{TempCleanupGuard, track_temp_file, untrack_temp_file};
 use crate::constants::CLIENT_HEADER_VALUE;
 use crate::http::{build_client, build_endpoint_url, parse_json};
 use crate::list::ListResponse;
-use crate::progress::{
-    self, ActiveConnectionGuard, PARTIAL_STATE_UPDATE_THRESHOLD, create_progress_bar,
-    create_progress_bar_with_message,
-};
+use crate::progress::{self, ActiveConnectionGuard, PARTIAL_STATE_UPDATE_THRESHOLD};
 use crate::retry::retry;
 use anyhow::{Context, Result, anyhow};
-use indicatif::ProgressBar;
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget};
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
 use reqwest::{StatusCode, Url};
@@ -19,7 +16,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, Mutex,
+    Arc, Condvar, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 
@@ -47,6 +44,60 @@ struct InfoSummary {
 }
 
 const MAX_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
+
+#[derive(Clone)]
+struct ProgressContext {
+    multi: Option<Arc<MultiProgress>>,
+}
+
+impl ProgressContext {
+    fn new() -> Self {
+        Self { multi: None }
+    }
+
+    fn new_multi() -> Self {
+        let multi = MultiProgress::new();
+        multi.set_draw_target(ProgressDrawTarget::stderr());
+        Self {
+            multi: Some(Arc::new(multi)),
+        }
+    }
+
+    fn bar(&self, total: Option<u64>, label: &str) -> ProgressBar {
+        self.bar_with_message(total, label, None)
+    }
+
+    fn bar_with_message(
+        &self,
+        total: Option<u64>,
+        label: &str,
+        message: Option<String>,
+    ) -> ProgressBar {
+        progress::create_progress_bar_with_message_in(self.multi.as_deref(), total, label, message)
+    }
+
+    fn println(&self, message: &str) {
+        if let Some(multi) = &self.multi {
+            let _ = multi.println(message.to_string());
+        } else {
+            println!("{message}");
+        }
+    }
+
+    fn eprintln(&self, message: &str) {
+        if let Some(multi) = &self.multi {
+            let _ = multi.println(message.to_string());
+        } else {
+            eprintln!("{message}");
+        }
+    }
+
+    fn clear(&self) {
+        if let Some(multi) = &self.multi {
+            let _ = multi.clear();
+        }
+    }
+}
 
 fn format_size(bytes: u64) -> String {
     const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
@@ -77,7 +128,172 @@ fn build_download_url(host: &str, id: &str) -> Result<Url> {
     Ok(url)
 }
 
-pub fn download(
+pub fn download_many(
+    host: &str,
+    ids: &[String],
+    out_override: Option<String>,
+    recursive: bool,
+    connections: u8,
+    existing_strategy: ExistingFileStrategy,
+    max_retries: usize,
+    parallel_limit: Option<u8>,
+) -> Result<()> {
+    if ids.is_empty() {
+        anyhow::bail!(
+            "download ID is required; pass --id <ID> or supply it as a positional argument"
+        );
+    }
+    if ids.len() > 1 && out_override.is_some() {
+        anyhow::bail!("--out can only be used with a single download ID");
+    }
+
+    let parallel_limit = parallel_limit.map(|value| value.clamp(1, 8));
+    let use_parallel = parallel_limit.is_some() && (ids.len() > 1 || recursive);
+    let progress = if use_parallel {
+        ProgressContext::new_multi()
+    } else {
+        ProgressContext::new()
+    };
+
+    let result = if use_parallel {
+        download_parallel(
+            &progress,
+            host,
+            ids,
+            recursive,
+            connections,
+            existing_strategy,
+            max_retries,
+            parallel_limit.unwrap_or(8),
+        )
+    } else {
+        let out_override = if ids.len() == 1 { out_override } else { None };
+        for id in ids {
+            download_one(
+                &progress,
+                host,
+                id,
+                out_override.clone(),
+                recursive,
+                connections,
+                existing_strategy,
+                max_retries,
+                parallel_limit,
+            )?;
+        }
+        Ok(())
+    };
+
+    progress.clear();
+    result
+}
+
+fn download_parallel(
+    progress: &ProgressContext,
+    host: &str,
+    ids: &[String],
+    recursive: bool,
+    connections: u8,
+    existing_strategy: ExistingFileStrategy,
+    max_retries: usize,
+    parallel_limit: u8,
+) -> Result<()> {
+    let worker_limit = parallel_limit.clamp(1, 8) as usize;
+    let worker_count = worker_limit.min(ids.len()).max(1);
+    let mut queue = VecDeque::with_capacity(ids.len());
+    for id in ids.iter().cloned() {
+        queue.push_back(id);
+    }
+
+    struct QueueState {
+        queue: VecDeque<String>,
+        active: usize,
+    }
+
+    let shared = Arc::new((Mutex::new(QueueState { queue, active: 0 }), Condvar::new()));
+    let failures = Arc::new(Mutex::new(Vec::new()));
+
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let shared = shared.clone();
+            let failures = failures.clone();
+            let progress = progress.clone();
+            let host = host.to_string();
+            handles.push(scope.spawn(move || {
+                loop {
+                    let id = {
+                        let (lock, cvar) = &*shared;
+                        let mut state = lock.lock().unwrap();
+                        loop {
+                            if let Some(id) = state.queue.pop_front() {
+                                state.active += 1;
+                                break Some(id);
+                            }
+                            if state.active == 0 {
+                                return;
+                            }
+                            state = cvar.wait(state).unwrap();
+                        }
+                    };
+
+                    let Some(id) = id else { break };
+                    let result = download_one(
+                        &progress,
+                        &host,
+                        &id,
+                        None,
+                        recursive,
+                        connections,
+                        existing_strategy,
+                        max_retries,
+                        Some(parallel_limit),
+                    );
+
+                    if let Err(err) = result {
+                        if let Ok(mut guard) = failures.lock() {
+                            guard.push(format!("{id}: {err}"));
+                        }
+                    }
+
+                    let (lock, cvar) = &*shared;
+                    let mut state = lock.lock().unwrap();
+                    state.active = state.active.saturating_sub(1);
+                    cvar.notify_all();
+                }
+            }));
+        }
+
+        for handle in handles {
+            if let Err(panic) = handle.join() {
+                let message = match panic.downcast::<String>() {
+                    Ok(message) => *message,
+                    Err(panic) => match panic.downcast::<&str>() {
+                        Ok(message) => (*message).to_string(),
+                        Err(_) => "download worker panicked".to_string(),
+                    },
+                };
+                if let Ok(mut guard) = failures.lock() {
+                    guard.push(message);
+                }
+            }
+        }
+    });
+
+    let failures = failures.lock().unwrap();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "{} download(s) failed:\n{}",
+            failures.len(),
+            failures.join("\n")
+        ))
+    }
+}
+
+fn download_one(
+    progress: &ProgressContext,
     host: &str,
     id: &str,
     out_override: Option<String>,
@@ -85,6 +301,7 @@ pub fn download(
     connections: u8,
     existing_strategy: ExistingFileStrategy,
     max_retries: usize,
+    parallel_limit: Option<u8>,
 ) -> Result<()> {
     let trimmed = id.trim();
     if trimmed.is_empty() {
@@ -118,10 +335,10 @@ pub fn download(
             }
             ExistingFileStrategy::Skip => {
                 if base_local.exists() {
-                    println!(
+                    progress.println(&format!(
                         "Skipping download; local directory {} already exists",
                         base_local.display()
-                    );
+                    ));
                     return Ok(());
                 }
             }
@@ -129,6 +346,7 @@ pub fn download(
         }
 
         download_directory_recursive(
+            progress,
             &client,
             host,
             &base_local,
@@ -136,8 +354,9 @@ pub fn download(
             connections,
             existing_strategy,
             max_retries,
+            parallel_limit,
         )?;
-        println!("Directory saved to {}", base_local.display());
+        progress.println(&format!("Directory saved to {}", base_local.display()));
         return Ok(());
     }
 
@@ -149,6 +368,7 @@ pub fn download(
     let remote_label = entry_display_name(&entry_info).unwrap_or_else(|| format!("id:{trimmed}"));
     let download_url = build_download_url(host, trimmed)?;
     let outcome = download_file_with_url(
+        progress,
         &client,
         download_url,
         &remote_label,
@@ -159,12 +379,12 @@ pub fn download(
     )?;
 
     if outcome.skipped {
-        println!(
+        progress.println(&format!(
             "Skipped download; keeping existing file at {}",
             outcome.path.display()
-        );
+        ));
     } else {
-        println!("Saved to {}", outcome.path.display());
+        progress.println(&format!("Saved to {}", outcome.path.display()));
     }
     Ok(())
 }
@@ -183,6 +403,7 @@ fn finalize_empty_file(output: &Path) -> Result<()> {
 }
 
 fn download_file_with_url(
+    progress: &ProgressContext,
     client: &Client,
     url: Url,
     remote_label: &str,
@@ -193,6 +414,7 @@ fn download_file_with_url(
 ) -> Result<DownloadOutcome> {
     retry("download", max_retries, || {
         download_file_once(
+            progress,
             client,
             url.clone(),
             remote_label,
@@ -205,6 +427,7 @@ fn download_file_with_url(
 }
 
 fn download_file_once(
+    progress: &ProgressContext,
     client: &Client,
     url: Url,
     remote_label: &str,
@@ -251,7 +474,7 @@ fn download_file_once(
                 err
             ),
         };
-        println!("{}", message);
+        progress.println(&message);
         return Ok(DownloadOutcome {
             path: output_path,
             skipped: true,
@@ -276,7 +499,11 @@ fn download_file_once(
 
     if matches!(probe.length, Some(0)) {
         finalize_empty_file(&output_path)?;
-        println!("Downloaded {} from {}", format_size(0), remote_label);
+        progress.println(&format!(
+            "Downloaded {} from {}",
+            format_size(0),
+            remote_label
+        ));
         cleanup_guard.disarm();
         return Ok(DownloadOutcome {
             path: output_path,
@@ -289,10 +516,13 @@ fn download_file_once(
     let multi_supported =
         probe.length.is_some() && probe.accept_ranges && effective_connections > 1;
     if requested_connections > 1 && !multi_supported {
-        eprintln!("server does not support multi-connection downloads; using a single connection");
+        progress.eprintln(
+            "server does not support multi-connection downloads; using a single connection",
+        );
     }
 
     let downloaded_len = download_to_single_file(
+        progress,
         client,
         &url,
         &output_path,
@@ -306,13 +536,17 @@ fn download_file_once(
     cleanup_guard.disarm();
 
     if let Some(total) = probe.length {
-        println!("Downloaded {} from {}", format_size(total), remote_label);
+        progress.println(&format!(
+            "Downloaded {} from {}",
+            format_size(total),
+            remote_label
+        ));
     } else {
-        println!(
+        progress.println(&format!(
             "Downloaded {} from {}",
             format_size(downloaded_len),
             remote_label
-        );
+        ));
     }
     Ok(DownloadOutcome {
         path: output_path,
@@ -677,6 +911,7 @@ fn download_with_multiple_connections(
 }
 
 fn download_to_single_file(
+    progress: &ProgressContext,
     client: &Client,
     url: &Url,
     output: &Path,
@@ -699,10 +934,10 @@ fn download_to_single_file(
     if let Some(state) = &partial_state {
         if let (Some(saved_total), Some(current_total)) = (state.total, total) {
             if saved_total != current_total {
-                eprintln!(
+                progress.eprintln(&format!(
                     "existing partial download has mismatched size; restarting {}",
                     output.display()
-                );
+                ));
                 let _ = fs::remove_file(&temp_path);
                 clear_partial_state(&temp_path);
                 partial_state = None;
@@ -742,10 +977,10 @@ fn download_to_single_file(
             let chunk_count = chunk_count_for_total(total);
             if let Some(state) = &partial_state {
                 if state.part_count != chunk_count {
-                    eprintln!(
+                    progress.eprintln(&format!(
                         "existing partial download uses incompatible chunk layout; restarting {}",
                         output.display()
-                    );
+                    ));
                     let _ = fs::remove_file(&temp_path);
                     clear_partial_state(&temp_path);
                     partial_state = None;
@@ -757,7 +992,7 @@ fn download_to_single_file(
             let displayed_connections = connection_limit.min(state.part_count.max(1)).max(1);
             state.total = Some(total);
             state.ensure_layout(total);
-            let progress = create_progress_bar_with_message(
+            let progress_bar = progress.bar_with_message(
                 Some(total),
                 label,
                 progress::connection_status_message(0, displayed_connections),
@@ -767,7 +1002,7 @@ fn download_to_single_file(
                 url,
                 &temp_path,
                 total,
-                &progress,
+                &progress_bar,
                 state,
                 connection_limit,
                 max_retries,
@@ -810,11 +1045,11 @@ fn download_to_single_file(
         .with_context(|| format!("failed to seek temp file {}", temp_path.display()))?;
     let mut writer = BufWriter::new(file);
 
-    let progress = create_progress_bar(total, label);
+    let progress_bar = progress.bar(total, label);
     if existing > 0 {
-        progress.inc(existing);
+        progress_bar.inc(existing);
     }
-    let _bytes_written = stream_to_writer(&mut response, &mut writer, &progress)?;
+    let _bytes_written = stream_to_writer(&mut response, &mut writer, &progress_bar)?;
 
     drop(writer);
 
@@ -878,6 +1113,7 @@ fn finalize_temp_file(temp_path: &Path, output: &Path, total: Option<u64>) -> Re
 }
 
 fn download_directory_recursive(
+    progress: &ProgressContext,
     client: &Client,
     host: &str,
     local_dir: &Path,
@@ -885,9 +1121,24 @@ fn download_directory_recursive(
     connections: u8,
     existing_strategy: ExistingFileStrategy,
     max_retries: usize,
+    parallel_limit: Option<u8>,
 ) -> Result<()> {
     fs::create_dir_all(local_dir)
         .with_context(|| format!("failed to create directory {}", local_dir.display()))?;
+
+    if let Some(parallel_limit) = parallel_limit {
+        return download_directory_parallel(
+            progress,
+            client,
+            host,
+            local_dir,
+            listing,
+            connections,
+            existing_strategy,
+            max_retries,
+            parallel_limit,
+        );
+    }
 
     for entry in listing.entries {
         let entry_id = entry
@@ -904,16 +1155,17 @@ fn download_directory_recursive(
             }
 
             if matches!(existing_strategy, ExistingFileStrategy::Skip) && target_local.exists() {
-                println!(
+                progress.println(&format!(
                     "Skipping download of directory {}; already exists",
                     target_local.display()
-                );
+                ));
                 continue;
             }
 
             let child_listing = fetch_listing_optional(client, host, &entry_id)?
                 .ok_or_else(|| anyhow!("failed to list directory {}", entry.name))?;
             download_directory_recursive(
+                progress,
                 client,
                 host,
                 &target_local,
@@ -921,10 +1173,12 @@ fn download_directory_recursive(
                 connections,
                 existing_strategy,
                 max_retries,
+                parallel_limit,
             )?;
         } else {
             let download_url = build_download_url(host, &entry_id)?;
             let _ = download_file_with_url(
+                progress,
                 client,
                 download_url,
                 &entry.name,
@@ -937,6 +1191,174 @@ fn download_directory_recursive(
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+struct DirectoryTask {
+    entry: crate::list::ListEntry,
+    parent: PathBuf,
+}
+
+fn download_directory_parallel(
+    progress: &ProgressContext,
+    client: &Client,
+    host: &str,
+    local_dir: &Path,
+    listing: ListResponse,
+    connections: u8,
+    existing_strategy: ExistingFileStrategy,
+    max_retries: usize,
+    parallel_limit: u8,
+) -> Result<()> {
+    if listing.entries.is_empty() {
+        return Ok(());
+    }
+
+    let worker_limit = parallel_limit.clamp(1, 8) as usize;
+    let worker_count = worker_limit.min(listing.entries.len()).max(1);
+
+    let mut queue = VecDeque::with_capacity(listing.entries.len());
+    for entry in listing.entries {
+        queue.push_back(DirectoryTask {
+            entry,
+            parent: local_dir.to_path_buf(),
+        });
+    }
+
+    struct QueueState {
+        queue: VecDeque<DirectoryTask>,
+        active: usize,
+    }
+
+    let shared = Arc::new((Mutex::new(QueueState { queue, active: 0 }), Condvar::new()));
+    let failures = Arc::new(Mutex::new(Vec::new()));
+
+    std::thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let shared = shared.clone();
+            let failures = failures.clone();
+            let progress = progress.clone();
+            let client = client.clone();
+            scope.spawn(move || {
+                loop {
+                    let task = {
+                        let (lock, cvar) = &*shared;
+                        let mut state = lock.lock().unwrap();
+                        loop {
+                            if let Some(task) = state.queue.pop_front() {
+                                state.active += 1;
+                                break Some(task);
+                            }
+                            if state.active == 0 {
+                                return;
+                            }
+                            state = cvar.wait(state).unwrap();
+                        }
+                    };
+
+                    let Some(task) = task else { break };
+                    let result = process_directory_task(
+                        &progress,
+                        &client,
+                        host,
+                        task,
+                        connections,
+                        existing_strategy,
+                        max_retries,
+                    );
+
+                    let mut new_tasks = Vec::new();
+                    match result {
+                        Ok(mut produced) => new_tasks.append(&mut produced),
+                        Err(err) => {
+                            if let Ok(mut guard) = failures.lock() {
+                                guard.push(err.to_string());
+                            }
+                        }
+                    }
+
+                    let (lock, cvar) = &*shared;
+                    let mut state = lock.lock().unwrap();
+                    state.active = state.active.saturating_sub(1);
+                    for task in new_tasks {
+                        state.queue.push_back(task);
+                    }
+                    cvar.notify_all();
+                }
+            });
+        }
+    });
+
+    let failures = failures.lock().unwrap();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "{} recursive download(s) failed:\n{}",
+            failures.len(),
+            failures.join("\n")
+        ))
+    }
+}
+
+fn process_directory_task(
+    progress: &ProgressContext,
+    client: &Client,
+    host: &str,
+    task: DirectoryTask,
+    connections: u8,
+    existing_strategy: ExistingFileStrategy,
+    max_retries: usize,
+) -> Result<Vec<DirectoryTask>> {
+    let entry = task.entry;
+    let parent = task.parent;
+    let entry_id = entry
+        .id
+        .clone()
+        .ok_or_else(|| anyhow!("entry {} missing id", entry.name))?;
+    let child_local = parent.join(&entry.name);
+
+    if entry.is_dir {
+        let mut target_local = child_local;
+        if matches!(existing_strategy, ExistingFileStrategy::Duplicate) && target_local.exists() {
+            target_local = next_available_path(&target_local);
+        }
+
+        if matches!(existing_strategy, ExistingFileStrategy::Skip) && target_local.exists() {
+            progress.println(&format!(
+                "Skipping download of directory {}; already exists",
+                target_local.display()
+            ));
+            return Ok(Vec::new());
+        }
+
+        fs::create_dir_all(&target_local)
+            .with_context(|| format!("failed to create directory {}", target_local.display()))?;
+
+        let child_listing = fetch_listing_optional(client, host, &entry_id)?
+            .ok_or_else(|| anyhow!("failed to list directory {}", entry.name))?;
+        let mut tasks = Vec::with_capacity(child_listing.entries.len());
+        for entry in child_listing.entries {
+            tasks.push(DirectoryTask {
+                entry,
+                parent: target_local.clone(),
+            });
+        }
+        Ok(tasks)
+    } else {
+        let download_url = build_download_url(host, &entry_id)?;
+        let _ = download_file_with_url(
+            progress,
+            client,
+            download_url,
+            &entry.name,
+            &child_local,
+            connections,
+            existing_strategy,
+            max_retries,
+        )?;
+        Ok(Vec::new())
+    }
 }
 
 fn default_output_path(info: &InfoSummary, fallback_id: &str) -> PathBuf {

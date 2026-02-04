@@ -1,4 +1,4 @@
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -7,17 +7,21 @@ use std::sync::{
 pub const PARTIAL_STATE_UPDATE_THRESHOLD: u64 = 8 * 1024 * 1024; // 8 MiB
 
 pub fn create_progress_bar(total: Option<u64>, label: &str) -> ProgressBar {
-    create_progress_bar_with_message(total, label, None)
+    create_progress_bar_with_message_in(None, total, label, None)
 }
 
-pub fn create_progress_bar_with_message(
+pub fn create_progress_bar_with_message_in(
+    multi: Option<&MultiProgress>,
     total: Option<u64>,
     label: &str,
     message: Option<String>,
 ) -> ProgressBar {
     let formatted = format_label(label);
     if let Some(len) = total {
-        let pb = ProgressBar::new(len);
+        let pb = match multi {
+            Some(multi) => multi.add(ProgressBar::new(len)),
+            None => ProgressBar::new(len),
+        };
         pb.set_prefix(formatted);
         pb.set_message(message.unwrap_or_default());
         pb.set_style(
@@ -30,7 +34,10 @@ pub fn create_progress_bar_with_message(
         pb.enable_steady_tick(std::time::Duration::from_millis(100));
         pb
     } else {
-        let pb = ProgressBar::new_spinner();
+        let pb = match multi {
+            Some(multi) => multi.add(ProgressBar::new_spinner()),
+            None => ProgressBar::new_spinner(),
+        };
         pb.set_prefix(formatted);
         pb.set_message(message.unwrap_or_default());
         pb.set_style(

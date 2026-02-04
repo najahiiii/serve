@@ -71,12 +71,21 @@ struct CatalogIdArg {
     positional_id: Option<String>,
 }
 
+fn normalize_id(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 impl CatalogIdArg {
     fn provided(&self) -> Option<String> {
         self.flag_id
             .as_deref()
-            .and_then(Self::normalize)
-            .or_else(|| self.positional_id.as_deref().and_then(Self::normalize))
+            .and_then(normalize_id)
+            .or_else(|| self.positional_id.as_deref().and_then(normalize_id))
     }
 
     fn required(&self, context: &str) -> Result<String> {
@@ -88,14 +97,41 @@ impl CatalogIdArg {
     fn with_default(&self, default: &str) -> String {
         self.provided().unwrap_or_else(|| default.to_string())
     }
+}
 
-    fn normalize(value: &str) -> Option<String> {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
+#[derive(Args, Clone, Debug, Default)]
+struct DownloadIdsArg {
+    #[arg(
+        long = "id",
+        value_name = "ID",
+        num_args = 1..,
+        conflicts_with = "positional_ids",
+        help = "Catalog ID(s) to download"
+    )]
+    flag_ids: Vec<String>,
+    #[arg(
+        value_name = "ID",
+        num_args = 0..,
+        conflicts_with = "flag_ids",
+        help = "Catalog ID(s) to download"
+    )]
+    positional_ids: Vec<String>,
+}
+
+impl DownloadIdsArg {
+    fn ids(&self) -> Result<Vec<String>> {
+        let raw = if !self.flag_ids.is_empty() {
+            &self.flag_ids
         } else {
-            Some(trimmed.to_string())
+            &self.positional_ids
+        };
+        let ids: Vec<String> = raw.iter().filter_map(|id| normalize_id(id)).collect();
+        if ids.is_empty() {
+            anyhow::bail!(
+                "download ID is required; pass --id <ID> or supply it as a positional argument"
+            );
         }
+        Ok(ids)
     }
 }
 
@@ -107,9 +143,9 @@ enum Command {
     Download {
         #[arg(long, help = "Base host URL (e.g. https://files.example.com)")]
         host: Option<String>,
-        /// Catalog ID to download (positional or --id)
+        /// Catalog ID(s) to download (positional or --id)
         #[command(flatten)]
-        target: CatalogIdArg,
+        targets: DownloadIdsArg,
         /// Output file (defaults to last path segment)
         #[arg(short = 'O', long)]
         out: Option<String>,
@@ -132,6 +168,16 @@ enum Command {
         /// Preserve existing files by writing duplicates with numeric suffix
         #[arg(long, default_value_t = false, conflicts_with = "skip")]
         dup: bool,
+        /// Download in parallel (optional max tasks, default 8)
+        #[arg(
+            short = 'P',
+            long,
+            value_name = "N",
+            num_args = 0..=1,
+            default_missing_value = "8",
+            value_parser = clap::value_parser!(u8)
+        )]
+        parallel: Option<u8>,
     },
     /// Upload a file to the server
     Upload {
@@ -203,15 +249,16 @@ fn main() -> Result<()> {
         Command::Config => show_config(&loaded_config, config.as_deref()),
         Command::Download {
             host,
-            target,
+            targets,
             out,
             recursive,
             connections,
             skip,
             dup,
+            parallel,
         } => {
             let resolved_host = resolve_host(host, &app_config);
-            let entry_id = target.required("download ID")?;
+            let entry_ids = targets.ids()?;
             let existing_strategy = if skip {
                 ExistingFileStrategy::Skip
             } else if dup {
@@ -219,14 +266,15 @@ fn main() -> Result<()> {
             } else {
                 ExistingFileStrategy::Overwrite
             };
-            download::download(
+            download::download_many(
                 &resolved_host,
-                &entry_id,
+                &entry_ids,
                 out,
                 recursive,
                 connections.clamp(1, 16),
                 existing_strategy,
                 retry_attempts,
+                parallel,
             )
         }
         Command::Upload {
