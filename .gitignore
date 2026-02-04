@@ -1,4 +1,4 @@
-dist
-target
 config.toml
-*.tar
+dist
+release
+target

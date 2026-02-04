@@ -1,4 +1,5 @@
 DIST_DIR := dist
+REL_DIR := release
 SERVER_BIN := serve
 CLI_BIN := serve-cli
 PREFIX ?= /usr/local
@@ -148,6 +149,7 @@ compress-targets: build-targets
 
 release: compress-targets
 	@set -e; \
+	mkdir -p $(REL_DIR); \
 	for target in $(TARGETS); do \
 		bin_ext=""; \
 		case "$$target" in \
@@ -159,7 +161,7 @@ release: compress-targets
 			tar -C $(DIST_DIR)/$$target \
 				--transform='s,^\./,,' \
 				--transform='s,^,serve-$(VERSION)/,' \
-				-cf serve-$(VERSION)_$${target}_rel.tar .; \
+				-cf $(REL_DIR)/serve-$(VERSION)_$${target}_rel.tar .; \
 		fi; \
 	done
 
@@ -169,4 +171,5 @@ install: compress
 
 clean:
 	rm -rf $(DIST_DIR)
+	rm -rf $(REL_DIR)
 	cargo clean
