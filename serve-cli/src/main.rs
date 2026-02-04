@@ -47,7 +47,12 @@ struct Cli {
     #[arg(long, global = true, help = "Path to custom configuration file")]
     config: Option<PathBuf>,
     /// Override maximum retry attempts
-    #[arg(short = 'R', long, global = true, help = "Override maximum retry attempts")]
+    #[arg(
+        short = 'r',
+        long,
+        global = true,
+        help = "Override maximum retry attempts"
+    )]
     retries: Option<usize>,
     #[command(subcommand)]
     command: Command,
@@ -109,7 +114,7 @@ enum Command {
         #[arg(short = 'O', long)]
         out: Option<String>,
         /// Download directories recursively
-        #[arg(short = 'r', long, default_value_t = false)]
+        #[arg(short = 'R', long, default_value_t = false)]
         recursive: bool,
         /// Number of parts to split the download into (requires range support)
         #[arg(
