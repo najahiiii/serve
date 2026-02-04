@@ -107,9 +107,9 @@ build-targets: dist
 		if [ -n "$$linker_var" ]; then \
 			linker_arg="CARGO_TARGET_$${target_upper}_LINKER=$$linker_var"; \
 		fi; \
-		env $$cc_arg $$linker_arg cargo build --package serve --release --target $$target; \
+		env $$cc_arg $$linker_arg cargo build --package serve --release --quiet --target $$target; \
 		install -m 755 target/$$target/release/$(SERVER_BIN)$${bin_ext} $(DIST_DIR)/$$target/$(SERVER_BIN)$${bin_ext}; \
-		env $$cc_arg $$linker_arg cargo build --package serve-cli --release --target $$target; \
+		env $$cc_arg $$linker_arg cargo build --package serve-cli --release --quiet --target $$target; \
 		install -m 755 target/$$target/release/$(CLI_BIN)$${bin_ext} $(DIST_DIR)/$$target/$(CLI_BIN)$${bin_ext}; \
 	done; \
 	if [ $$skipped -ne 0 ]; then \
@@ -117,11 +117,11 @@ build-targets: dist
 	fi
 
 server: dist
-	cargo build --package serve --release $(CARGO_TARGET_FLAG)
+	cargo build --package serve --release --quiet $(CARGO_TARGET_FLAG)
 	install -m 755 $(TARGET_RELEASE_DIR)/$(SERVER_BIN)$(BIN_EXT) $(DIST_TARGET_DIR)/$(SERVER_BIN)$(BIN_EXT)
 
 cli: dist
-	cargo build --package serve-cli --release $(CARGO_TARGET_FLAG)
+	cargo build --package serve-cli --release --quiet $(CARGO_TARGET_FLAG)
 	install -m 755 $(TARGET_RELEASE_DIR)/$(CLI_BIN)$(BIN_EXT) $(DIST_TARGET_DIR)/$(CLI_BIN)$(BIN_EXT)
 
 compress: build
