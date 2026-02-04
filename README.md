@@ -43,7 +43,24 @@ Upload token, root paths, extension whitelist, blacklist can be customized.
 ./dist/serve run --config /path/to/config.toml
 ```
 
-CLI supports `--root`, `--port`, `--upload-token`, `--max-file-size`, etc. `init-config` subcommand writes `$HOME/.config/serve/config.toml` template.
+`serve` commands and options:
+
+| Command       | Description                                                    |
+| ------------- | -------------------------------------------------------------- |
+| `run`         | Run the HTTP file server                                       |
+| `init-config` | Generate a default config at `$HOME/.config/serve/config.toml` |
+| `show-config` | Print the effective configuration and exit                     |
+
+`serve run` / `serve show-config` options:
+
+| Arg                       | Description                             | Default         |
+| ------------------------- | --------------------------------------- | --------------- |
+| `--config <FILE>`         | Path to configuration file (TOML)       | auto-located    |
+| `--port <PORT>`           | Override listening port                 | from config/env |
+| `--upload-token <TOKEN>`  | Override upload token                   | from config/env |
+| `--max-file-size <BYTES>` | Override maximum upload size            | from config/env |
+| `--root <PATH>`           | Override root directory to serve        | from config/env |
+| `--show-token`            | (show-config only) display upload token | off             |
 
 ## systemd deployment
 
@@ -86,6 +103,82 @@ cargo build --package serve-cli --release
 Install via `make build` / `make install` to populate `dist/serve-cli` and `/usr/local/bin/serve-cli`.
 
 Commands operate on catalog IDs (e.g. `root`, entries returned by `serve-cli list` or `serve-cli info`). IDs can be passed positionally (as in the examples above) or via `--id <ID>`. The server emits JSON directory listings when clients send the header `X-Serve-Client: serve-cli` (used by the helper); browsers still receive the HTML view by default.
+
+`serve-cli` global options:
+
+| Arg                 | Description                       | Default      |
+| ------------------- | --------------------------------- | ------------ |
+| `--config <FILE>`   | Path to custom configuration file | auto-located |
+| `-r, --retries <N>` | Override maximum retry attempts   | 10           |
+
+`serve-cli` commands:
+
+| Command    | Description                      |
+| ---------- | -------------------------------- |
+| `config`   | Show configured defaults         |
+| `download` | Download file(s) or directory    |
+| `upload`   | Upload a file                    |
+| `list`     | List directory contents          |
+| `info`     | Show entry metadata              |
+| `delete`   | Delete an entry                  |
+| `setup`    | Interactive configuration helper |
+| `version`  | Print version/build information  |
+
+`serve-cli download` options:
+
+| Arg                     | Description                                    | Default                               |
+| ----------------------- | ---------------------------------------------- | ------------------------------------- |
+| `--host <URL>`          | Base host URL                                  | from config                           |
+| `--id <ID...>`          | One or more catalog IDs                        | required if no positional IDs         |
+| `<ID...>`               | Positional catalog IDs                         | optional                              |
+| `-O, --out <FILE>`      | Output file (single ID only)                   | inferred                              |
+| `-R, --recursive`       | Download directories recursively               | off                                   |
+| `-C, --connections [N]` | Parts per file (range requests)                | 1 (or 16 if flag used without value)  |
+| `--skip`                | Skip if local file exists                      | off                                   |
+| `--dup`                 | Preserve existing files by writing a duplicate | off                                   |
+| `-P, --parallel [N]`    | Parallel tasks (1..8)                          | off (or 8 if flag used without value) |
+
+`serve-cli upload` options:
+
+| Arg                    | Description                     | Default     |
+| ---------------------- | ------------------------------- | ----------- |
+| `--host <URL>`         | Base host URL                   | from config |
+| `<FILE>`               | File to upload                  | required    |
+| `--token <TOKEN>`      | Upload token (X-Serve-Token)    | from config |
+| `-p, --parent-id <ID>` | Target directory ID             | `root`      |
+| `--allow-no-ext`       | Allow uploads without extension | off         |
+| `--bypass`             | Bypass extension whitelist      | off         |
+| `--stream`             | Use streaming upload            | off         |
+
+`serve-cli list` options:
+
+| Arg            | Description           | Default     |
+| -------------- | --------------------- | ----------- |
+| `--host <URL>` | Base host URL         | from config |
+| `--id <ID>`    | Catalog ID            | `root`      |
+| `<ID>`         | Positional catalog ID | `root`      |
+
+`serve-cli info` options:
+
+| Arg            | Description           | Default     |
+| -------------- | --------------------- | ----------- |
+| `--host <URL>` | Base host URL         | from config |
+| `--id <ID>`    | Catalog ID            | required    |
+| `<ID>`         | Positional catalog ID | required    |
+
+`serve-cli delete` options:
+
+| Arg               | Description                  | Default     |
+| ----------------- | ---------------------------- | ----------- |
+| `--host <URL>`    | Base host URL                | from config |
+| `--id <ID>`       | Catalog ID                   | required    |
+| `<ID>`            | Positional catalog ID        | required    |
+| `--token <TOKEN>` | Delete token (X-Serve-Token) | from config |
+
+Notes:
+
+- `--out` only applies when downloading a single ID.
+- For flags with optional values (`-C/--connections`, `-P/--parallel`), use `-C=16` / `-P=8` or place `--` before positional IDs if you want the default missing value (e.g., `serve-cli download -P -- <ID>`).
 
 ## Upload API
 
