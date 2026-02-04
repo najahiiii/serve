@@ -115,6 +115,8 @@ enum Command {
         #[arg(
             short = 'C',
             long,
+            num_args = 0..=1,
+            default_missing_value = "16",
             default_value_t = 1,
             value_parser = clap::value_parser!(u8).range(1..=16)
         )]
