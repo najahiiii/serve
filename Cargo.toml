@@ -2,6 +2,7 @@
 members = [
     "serve",
     "serve-cli",
+    "build-utils",
 ]
 resolver = "2"
 

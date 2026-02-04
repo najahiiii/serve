@@ -27,3 +27,6 @@ rusqlite = { version = "0.30", features = ["bundled"] }
 walkdir = "2"
 ulid = "1"
 rand = "0.8"
+
+[build-dependencies]
+build-utils = { path = "../build-utils" }

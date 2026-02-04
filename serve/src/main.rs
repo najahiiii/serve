@@ -93,6 +93,20 @@ const POWERED_BY: &str = concat!("serve/", env!("CARGO_PKG_VERSION"));
 // Smaller chunk keeps initial response snappy while still streaming efficiently.
 const STREAM_BUFFER_BYTES: usize = 256 * 1024;
 const GENERATED_TOKEN_LEN: usize = 32;
+const VERSION_SUMMARY: &str = concat!(
+    "serve: ",
+    env!("CARGO_PKG_VERSION"),
+    "\nRust: ",
+    env!("SERVE_RUSTC_VERSION"),
+    "\nOS/Arch: ",
+    env!("SERVE_TARGET_OS"),
+    "/",
+    env!("SERVE_TARGET_ARCH"),
+    "\nCommit: ",
+    env!("SERVE_GIT_COMMIT"),
+    "\nBuilt: ",
+    env!("SERVE_BUILD_TIME")
+);
 
 fn default_config_body(token: &str) -> String {
     DEFAULT_CONFIG_BODY_TEMPLATE.replace("{token}", token)
@@ -109,9 +123,9 @@ fn generate_upload_token() -> String {
 #[derive(Parser)]
 #[command(
     name = "serve",
-    version,
+    version = env!("CARGO_PKG_VERSION"),
     about = "Serve files over HTTP with optional upload support.",
-    long_about = None
+    disable_version_flag = true
 )]
 struct Cli {
     #[command(subcommand)]
@@ -154,6 +168,8 @@ enum Command {
     InitConfig,
     /// Print the effective configuration and exit
     ShowConfig(ShowConfigArgs),
+    /// Print version/build information
+    Version,
 }
 
 #[derive(Clone)]
@@ -179,6 +195,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?,
         Command::InitConfig => init_config_file()?,
         Command::ShowConfig(args) => show_config(args)?,
+        Command::Version => {
+            println!("{VERSION_SUMMARY}");
+        }
     }
 
     Ok(())

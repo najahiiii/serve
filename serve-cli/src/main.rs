@@ -229,7 +229,7 @@ enum Command {
     },
     /// Interactive configuration helper
     Setup,
-    /// Display serve-cli version information
+    /// Print version/build information
     Version,
 }
 

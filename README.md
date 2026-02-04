@@ -50,6 +50,7 @@ Upload token, root paths, extension whitelist, blacklist can be customized.
 | `run`         | Run the HTTP file server                                       |
 | `init-config` | Generate a default config at `$HOME/.config/serve/config.toml` |
 | `show-config` | Print the effective configuration and exit                     |
+| `version`     | Print version/build information                                |
 
 `serve run` / `serve show-config` options:
 
