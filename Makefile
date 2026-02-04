@@ -7,6 +7,10 @@ VERSION := $(shell sed -n 's/^version[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' Car
 TARGETS ?= $(shell rustup target list --installed)
 HOST_TRIPLE ?= $(shell rustc -vV | sed -n 's/^host: //p')
 TARGET ?= $(HOST_TRIPLE)
+BIN_EXT :=
+ifneq (,$(findstring windows,$(TARGET)))
+	BIN_EXT := .exe
+endif
 ANDROID_API ?= 21
 NDK_HOME ?= $(shell \
 	if [ -n "$$ANDROID_NDK_HOME" ]; then echo $$ANDROID_NDK_HOME; \
@@ -62,6 +66,22 @@ build-targets: dist
 					fi; \
 				fi; \
 			fi; \
+			if [ -z "$$cc_var" ] && [ -z "$$linker_var" ]; then \
+				case "$$target" in \
+					x86_64-pc-windows-gnu) mingw_prefix=x86_64-w64-mingw32 ;; \
+					i686-pc-windows-gnu) mingw_prefix=i686-w64-mingw32 ;; \
+					*) mingw_prefix="";; \
+				esac; \
+				if [ -n "$$mingw_prefix" ]; then \
+					if command -v "$$mingw_prefix-gcc" >/dev/null 2>&1; then \
+						cc_var="$$(command -v $$mingw_prefix-gcc)"; \
+						linker_var="$$cc_var"; \
+					elif command -v "$$mingw_prefix-clang" >/dev/null 2>&1; then \
+						cc_var="$$(command -v $$mingw_prefix-clang)"; \
+						linker_var="$$cc_var"; \
+					fi; \
+				fi; \
+			fi; \
 			if [ -z "$$cc_var" ] && [ -z "$$linker_var" ] \
 				&& ! command -v "$$target-gcc" >/dev/null 2>&1 \
 				&& ! command -v "$$target-clang" >/dev/null 2>&1 \
@@ -74,6 +94,11 @@ build-targets: dist
 		fi; \
 		echo "==> Building for $$target"; \
 		mkdir -p $(DIST_DIR)/$$target; \
+		bin_ext=""; \
+		case "$$target" in \
+			*-pc-windows-*) bin_ext=".exe" ;; \
+			*) bin_ext="" ;; \
+		esac; \
 		cc_arg=""; \
 		linker_arg=""; \
 		if [ -n "$$cc_var" ]; then \
@@ -83,9 +108,9 @@ build-targets: dist
 			linker_arg="CARGO_TARGET_$${target_upper}_LINKER=$$linker_var"; \
 		fi; \
 		env $$cc_arg $$linker_arg cargo build --package serve --release --target $$target; \
-		install -m 755 target/$$target/release/$(SERVER_BIN) $(DIST_DIR)/$$target/$(SERVER_BIN); \
+		install -m 755 target/$$target/release/$(SERVER_BIN)$${bin_ext} $(DIST_DIR)/$$target/$(SERVER_BIN)$${bin_ext}; \
 		env $$cc_arg $$linker_arg cargo build --package serve-cli --release --target $$target; \
-		install -m 755 target/$$target/release/$(CLI_BIN) $(DIST_DIR)/$$target/$(CLI_BIN); \
+		install -m 755 target/$$target/release/$(CLI_BIN)$${bin_ext} $(DIST_DIR)/$$target/$(CLI_BIN)$${bin_ext}; \
 	done; \
 	if [ $$skipped -ne 0 ]; then \
 		echo "Finished with $$skipped skipped target(s)."; \
@@ -93,33 +118,43 @@ build-targets: dist
 
 server: dist
 	cargo build --package serve --release $(CARGO_TARGET_FLAG)
-	install -m 755 $(TARGET_RELEASE_DIR)/$(SERVER_BIN) $(DIST_TARGET_DIR)/$(SERVER_BIN)
+	install -m 755 $(TARGET_RELEASE_DIR)/$(SERVER_BIN)$(BIN_EXT) $(DIST_TARGET_DIR)/$(SERVER_BIN)$(BIN_EXT)
 
 cli: dist
 	cargo build --package serve-cli --release $(CARGO_TARGET_FLAG)
-	install -m 755 $(TARGET_RELEASE_DIR)/$(CLI_BIN) $(DIST_TARGET_DIR)/$(CLI_BIN)
+	install -m 755 $(TARGET_RELEASE_DIR)/$(CLI_BIN)$(BIN_EXT) $(DIST_TARGET_DIR)/$(CLI_BIN)$(BIN_EXT)
 
 compress: build
 	@command -v upx >/dev/null 2>&1 || { echo "upx not found in PATH"; exit 1; }
 	@command echo "Compressing $(SERVER_BIN), $(CLI_BIN)"
-	upx --best --lzma -q --no-progress $(DIST_TARGET_DIR)/$(SERVER_BIN) > /dev/null
-	upx --best --lzma -q --no-progress $(DIST_TARGET_DIR)/$(CLI_BIN) > /dev/null
+	upx --best --lzma -q --no-progress $(DIST_TARGET_DIR)/$(SERVER_BIN)$(BIN_EXT) > /dev/null
+	upx --best --lzma -q --no-progress $(DIST_TARGET_DIR)/$(CLI_BIN)$(BIN_EXT) > /dev/null
 
 compress-targets: build-targets
 	@command -v upx >/dev/null 2>&1 || { echo "upx not found in PATH"; exit 1; }
 	@set -e; \
 	for target in $(TARGETS); do \
-		if [ -f "$(DIST_DIR)/$$target/$(SERVER_BIN)" ]; then \
+		bin_ext=""; \
+		case "$$target" in \
+			*-pc-windows-*) bin_ext=".exe" ;; \
+			*) bin_ext="" ;; \
+		esac; \
+		if [ -f "$(DIST_DIR)/$$target/$(SERVER_BIN)$${bin_ext}" ]; then \
 			echo "==> Compressing $$target"; \
-			upx --best --lzma -q --no-progress $(DIST_DIR)/$$target/$(SERVER_BIN) > /dev/null; \
-			upx --best --lzma -q --no-progress $(DIST_DIR)/$$target/$(CLI_BIN) > /dev/null; \
+			upx --best --lzma -q --no-progress $(DIST_DIR)/$$target/$(SERVER_BIN)$${bin_ext} > /dev/null; \
+			upx --best --lzma -q --no-progress $(DIST_DIR)/$$target/$(CLI_BIN)$${bin_ext} > /dev/null; \
 		fi; \
 	done
 
 release: compress-targets
 	@set -e; \
 	for target in $(TARGETS); do \
-		if [ -f "$(DIST_DIR)/$$target/$(SERVER_BIN)" ]; then \
+		bin_ext=""; \
+		case "$$target" in \
+			*-pc-windows-*) bin_ext=".exe" ;; \
+			*) bin_ext="" ;; \
+		esac; \
+		if [ -f "$(DIST_DIR)/$$target/$(SERVER_BIN)$${bin_ext}" ]; then \
 			echo "==> Packaging $$target"; \
 			tar -C $(DIST_DIR)/$$target \
 				--transform='s,^\./,,' \
@@ -129,8 +164,8 @@ release: compress-targets
 	done
 
 install: compress
-	install -m 755 $(DIST_TARGET_DIR)/$(SERVER_BIN) $(BIN_DIR)/$(SERVER_BIN)
-	install -m 755 $(DIST_TARGET_DIR)/$(CLI_BIN) $(BIN_DIR)/$(CLI_BIN)
+	install -m 755 $(DIST_TARGET_DIR)/$(SERVER_BIN)$(BIN_EXT) $(BIN_DIR)/$(SERVER_BIN)$(BIN_EXT)
+	install -m 755 $(DIST_TARGET_DIR)/$(CLI_BIN)$(BIN_EXT) $(BIN_DIR)/$(CLI_BIN)$(BIN_EXT)
 
 clean:
 	rm -rf $(DIST_DIR)
