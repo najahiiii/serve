@@ -30,6 +30,17 @@
       td {
         padding-right: 15px;
       }
+      .actions {
+        white-space: nowrap;
+      }
+      .actions a {
+        font: inherit;
+        color: #1e90ff;
+        text-decoration: underline;
+      }
+      .actions a:hover {
+        text-decoration: none;
+      }
       th:hover,
       td:hover {
         text-decoration: underline;
@@ -78,11 +89,29 @@
         <th class="file-size">Size</th>
         <th class="mime">MIME</th>
         <th class="date">Last Modified</th>
+        <th class="actions">Actions</th>
       </tr>
       {{ rows }}
     </table>
     <footer>
       Disk used: {{ disk_usage }} | Total files: {{ total_files }} | &copy; {{ year }} <i>{{ host }}</i>.
     </footer>
+    <script>
+      document.addEventListener("click", (event) => {
+        const btn = event.target.closest("[data-copy-id]");
+        if (!btn) return;
+        const id = btn.dataset.copyId;
+        navigator.clipboard
+          .writeText(id)
+          .then(() => {
+            btn.textContent = "Copied!";
+            setTimeout(() => (btn.textContent = "Copy ID"), 1500);
+          })
+          .catch(() => {
+            btn.textContent = "Failed";
+            setTimeout(() => (btn.textContent = "Copy ID"), 1500);
+          });
+      });
+    </script>
   </body>
 </html>

@@ -35,21 +35,23 @@ const PREVIEW_AGENTS: [&str; 6] = [
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ViewQuery {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_boolish_option")]
     pub(crate) view: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct DownloadIdQuery {
     pub(crate) id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_boolish_option")]
     pub(crate) view: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_boolish_option")]
+    pub(crate) raw: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ListIdQuery {
     pub(crate) id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_boolish_option")]
     pub(crate) view: Option<bool>,
 }
 
@@ -152,7 +154,14 @@ async fn serve_path(
         .map_err(|err| AppError::Internal(err.to_string()))?;
 
     if metadata.is_dir() {
-        render_directory(&state, &headers, requested_path, full_path).await
+        render_directory(
+            &state,
+            &headers,
+            requested_path,
+            full_path,
+            query.view.unwrap_or(false),
+        )
+        .await
     } else if metadata.is_file() {
         serve_file(
             &headers,
@@ -201,6 +210,8 @@ pub(crate) async fn download_by_id(
     headers: HeaderMap,
     Query(query): Query<DownloadIdQuery>,
 ) -> Result<Response, AppError> {
+    let wants_view = query.view.unwrap_or(false);
+    let wants_raw = query.raw.unwrap_or(false);
     let id = query.id.trim();
     if id.is_empty() {
         return Err(AppError::BadRequest("Missing id parameter".to_string()));
@@ -222,6 +233,22 @@ pub(crate) async fn download_by_id(
             .map_err(|err| AppError::Internal(err.to_string()))?
             .ok_or_else(|| AppError::NotFound(NOT_FOUND_MESSAGE.to_string()))?;
         return render_file_preview(&detail, &headers);
+    }
+
+    if wants_view && !wants_raw && accepts_html(&headers) && !is_serve_cli(&headers) {
+        let detail = state
+            .catalog
+            .entry_detail(id)
+            .await
+            .map_err(|err| AppError::Internal(err.to_string()))?
+            .ok_or_else(|| AppError::NotFound(NOT_FOUND_MESSAGE.to_string()))?;
+        let mime = detail
+            .mime_type
+            .clone()
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        if is_media_mime(&mime) {
+            return render_media_player(&detail, &headers);
+        }
     }
 
     serve_entry_by_relative_path(
@@ -380,6 +407,7 @@ async fn render_directory(
     headers: &HeaderMap,
     requested_path: &str,
     directory_path: PathBuf,
+    view_mode: bool,
 ) -> Result<Response, AppError> {
     let mut entries = Vec::new();
     let mut read_dir = fs::read_dir(&directory_path).await.map_err(map_io_error)?;
@@ -458,8 +486,16 @@ async fn render_directory(
             .await
             .map_err(|err| AppError::Internal(err.to_string()))?;
 
-        let browse_link = format!("/list?id={}", entry_id);
-        let download_link = format!("/download?id={}", entry_id);
+        let browse_link = if view_mode {
+            format!("/list?id={}&view=true", entry_id)
+        } else {
+            format!("/list?id={}", entry_id)
+        };
+        let download_link = if view_mode {
+            format!("/download?id={}&view=true", entry_id)
+        } else {
+            format!("/download?id={}", entry_id)
+        };
         let relative_url = if is_dir {
             browse_link.clone()
         } else {
@@ -554,7 +590,7 @@ async fn render_directory(
     }
 
     let mut rows = String::new();
-    if let Some(parent_link) = parent_link(state, requested_path).await? {
+    if let Some(parent_link) = parent_link(state, requested_path, view_mode).await? {
         rows.push_str(&format!(
             r#"
                 <tr>
@@ -563,6 +599,7 @@ async fn render_directory(
                     <td class="file-size"></td>
                     <td class="mime"></td>
                     <td class="date"></td>
+                    <td class="actions"></td>
                 </tr>
             "#,
             link = parent_link
@@ -570,6 +607,28 @@ async fn render_directory(
     }
 
     for (idx, entry) in entries.iter().enumerate() {
+        let copy_btn = format!(
+            r##"<a class="copy" href="#" data-copy-id="{id}">Copy ID</a>"##,
+            id = encode_text(&entry.id)
+        );
+        let play_link = if !entry.is_dir && is_media_mime(&entry.mime_type) {
+            let mut href = entry.download_link.clone();
+            if !href.contains("view=true") {
+                if href.contains('?') {
+                    href.push_str("&view=true");
+                } else {
+                    href.push_str("?view=true");
+                }
+            }
+            format!(r#"<a class="play" href="{href}">Play</a>"#, href = href)
+        } else {
+            String::new()
+        };
+        let actions = if play_link.is_empty() {
+            copy_btn
+        } else {
+            format!("{copy} | {play}", copy = copy_btn, play = play_link)
+        };
         rows.push_str(&format!(
             r#"
                 <tr>
@@ -578,6 +637,7 @@ async fn render_directory(
                     <td class="file-size">{size}</td>
                     <td class="mime">{mime}</td>
                     <td class="date">{modified}</td>
+                    <td class="actions">{actions}</td>
                 </tr>
             "#,
             index = idx + 1,
@@ -585,7 +645,8 @@ async fn render_directory(
             display = encode_text(&entry.display_name),
             size = entry.size_display,
             mime = encode_text(&entry.mime_type),
-            modified = entry.modified_display
+            modified = entry.modified_display,
+            actions = actions
         ));
     }
 
@@ -755,7 +816,11 @@ fn parse_range_header(value: &str, size: u64) -> Result<Option<(u64, u64)>, ()> 
     }
 }
 
-async fn parent_link(state: &AppState, requested_path: &str) -> Result<Option<String>, AppError> {
+async fn parent_link(
+    state: &AppState,
+    requested_path: &str,
+    view: bool,
+) -> Result<Option<String>, AppError> {
     if requested_path.trim().is_empty() {
         return Ok(None);
     }
@@ -776,12 +841,20 @@ async fn parent_link(state: &AppState, requested_path: &str) -> Result<Option<St
     }
 
     if depth == 0 {
-        return Ok(Some("/list?id=root".to_string()));
+        return Ok(Some(if view {
+            "/list?id=root&view=true".to_string()
+        } else {
+            "/list?id=root".to_string()
+        }));
     }
 
     let parent_depth = depth.saturating_sub(1);
     if parent_depth == 0 {
-        return Ok(Some("/list?id=root".to_string()));
+        return Ok(Some(if view {
+            "/list?id=root&view=true".to_string()
+        } else {
+            "/list?id=root".to_string()
+        }));
     }
 
     let parts: Vec<&str> = requested_path
@@ -792,7 +865,11 @@ async fn parent_link(state: &AppState, requested_path: &str) -> Result<Option<St
     let parent_path = parts.join("/");
 
     if parent_path.is_empty() {
-        return Ok(Some("/list?id=root".to_string()));
+        return Ok(Some(if view {
+            "/list?id=root&view=true".to_string()
+        } else {
+            "/list?id=root".to_string()
+        }));
     }
 
     match state
@@ -801,7 +878,11 @@ async fn parent_link(state: &AppState, requested_path: &str) -> Result<Option<St
         .await
         .map_err(|err| AppError::Internal(err.to_string()))?
     {
-        Some(id) => Ok(Some(format!("/list?id={}", id))),
+        Some(id) => Ok(Some(if view {
+            format!("/list?id={}&view=true", id)
+        } else {
+            format!("/list?id={}", id)
+        })),
         None => Ok(None),
     }
 }
@@ -822,6 +903,58 @@ fn directory_label(requested_path: &str, host: &str) -> String {
             format!("{requested_path}/")
         }
     }
+}
+
+fn deserialize_boolish_option<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Option<String> = Option::deserialize(deserializer)?;
+    match raw {
+        None => Ok(None),
+        Some(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            match trimmed.to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" | "y" | "on" => Ok(Some(true)),
+                "false" | "0" | "no" | "n" | "off" => Ok(Some(false)),
+                other => Err(serde::de::Error::custom(format!(
+                    "expected boolean-like value, got `{}`",
+                    other
+                ))),
+            }
+        }
+    }
+}
+
+fn is_media_mime(mime: &str) -> bool {
+    let lower = mime.to_ascii_lowercase();
+    lower.starts_with("video/") || lower.starts_with("audio/")
+}
+
+fn accepts_html(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value.split(',').any(|part| {
+                let mime = part.split(';').next().unwrap_or("").trim();
+                mime.eq_ignore_ascii_case("text/html")
+                    || mime.eq_ignore_ascii_case("application/xhtml+xml")
+                    || mime == "*/*"
+            })
+        })
+        .unwrap_or(true)
+}
+
+fn is_serve_cli(headers: &HeaderMap) -> bool {
+    headers
+        .get("X-Serve-Client")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.eq_ignore_ascii_case("serve-cli"))
+        .unwrap_or(false)
 }
 
 #[derive(Debug)]
@@ -888,6 +1021,57 @@ fn render_file_preview(
         title = title,
         description = encode_text(&description),
         download = download_url
+    );
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(Body::from(html))
+        .map_err(|err| AppError::Internal(err.to_string()))
+}
+
+fn render_media_player(
+    detail: &CatalogEntryDetail,
+    headers: &HeaderMap,
+) -> Result<Response, AppError> {
+    let base = build_base_url(headers);
+    let trimmed = base.trim_end_matches('/');
+    let src = format!("{}/download?id={}&view=true&raw=1", trimmed, detail.id);
+    let title = encode_text(&detail.name);
+    let size_display = format_size(detail.size_bytes);
+    let mime = detail
+        .mime_type
+        .clone()
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let is_video = mime.to_ascii_lowercase().starts_with("video/");
+    let description = format!("{} · {}", size_display, mime);
+    let media_tag = if is_video {
+        format!(
+            "<video controls preload=\"metadata\" style=\"max-width:min(1280px,100%);height:auto;\" src=\"{src}\"></video>"
+        )
+    } else {
+        format!("<audio controls preload=\"metadata\" style=\"width:100%;\" src=\"{src}\"></audio>")
+    };
+
+    let html = format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+<title>{title}</title>\
+<meta property=\"og:title\" content=\"{title}\"/>\
+<meta property=\"og:description\" content=\"{description}\"/>\
+<meta property=\"og:type\" content=\"article\"/>\
+<meta property=\"og:url\" content=\"{src}\"/>\
+<meta name=\"twitter:card\" content=\"summary_large_image\"/>\
+<link rel=\"canonical\" href=\"{src}\"/></head>\
+<body style=\"font-family:system-ui,-apple-system,sans-serif;max-width:960px;margin:40px auto;padding:0 16px;\">\
+<h1 style=\"font-size:1.5rem;margin:0 0 12px 0;\">{title}</h1>\
+<p style=\"color:#555;margin:0 0 16px 0;\">{description}</p>\
+<div style=\"background:#f5f5f5;padding:12px;border-radius:8px;\">{media}</div>\
+<p style=\"margin-top:16px;\"><a href=\"{src}\" download>Download</a></p>\
+</body></html>",
+        title = title,
+        description = encode_text(&description),
+        src = src,
+        media = media_tag
     );
 
     Response::builder()
