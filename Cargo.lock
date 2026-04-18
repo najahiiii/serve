@@ -268,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "build-utils"
-version = "2.2.1"
+version = "2.3.0"
 dependencies = [
  "time",
 ]
@@ -2000,7 +2000,7 @@ dependencies = [
 
 [[package]]
 name = "serve"
-version = "2.2.1"
+version = "2.3.0"
 dependencies = [
  "axum",
  "build-utils",
@@ -2030,7 +2030,7 @@ dependencies = [
 
 [[package]]
 name = "serve-cli"
-version = "2.2.1"
+version = "2.3.0"
 dependencies = [
  "anyhow",
  "build-utils",
