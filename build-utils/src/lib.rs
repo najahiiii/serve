@@ -69,7 +69,8 @@ fn build_timestamp() -> String {
     let offset = UtcOffset::from_hms(7, 0, 0).unwrap();
     let wib_time = OffsetDateTime::now_utc().to_offset(offset);
     let format =
-        format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]").unwrap();
+        format_description::parse_borrowed::<3>("[year]-[month]-[day] [hour]:[minute]:[second]")
+            .unwrap();
     wib_time
         .format(&format)
         .unwrap_or_else(|_| "unknown".into())
